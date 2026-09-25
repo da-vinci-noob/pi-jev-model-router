@@ -151,7 +151,7 @@ async function postWithRetry(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (signal.aborted) throw new JevError("aborted");
     try {
-      const res = await fetch(config.endpoint, {
+      const res = await fetch(process.env?.[config.endpointEnv] ?? config?.endpoint ?? "https://api.typesafe.ai/v1/systemone", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
