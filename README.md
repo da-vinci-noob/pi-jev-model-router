@@ -413,6 +413,44 @@ entirely when a model's pricing is unknown, so it never blocks on guesses. Set
 }
 ```
 
+## Free models
+
+Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
+that costs nothing. A `free` pool is consulted outside the tier scale instead, so
+the judgment is untouched and a free model never has to pretend to be a tier.
+
+```json
+{
+  "free": {
+    "enabled": true,
+    "policy": "prefer",
+    "pool": [
+      { "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" },
+      { "provider": "opencode-go", "model": "longcat-2.5-preview-free", "thinkingLevel": "medium" }
+    ]
+  }
+}
+```
+
+- `policy: "prefer"` tries the pool first, then the kind chains and tier chains.
+- `policy: "fallback-only"` tries the pool last, after every tier chain.
+- `enabled: false` (the default) ignores the pool entirely, so an existing config
+  routes exactly as before.
+
+The pool is a plain candidate chain, so the first available and authenticated model
+wins and an unavailable one simply falls through to the normal chains. When a pool
+model wins, the decision still reports the tier Jev judged, plus a
+`free pool → <model>` note, so the transcript shows why the tier and the model
+differ.
+
+A pool model is not on any tier, so `tierForModel` reports no tier for it and the
+status line falls back to `jev-router:on`. That is deliberate: a free model has no
+capability tier.
+
+Free models are usually temporary. If a provider withdraws one, `firstAvailable`
+skips it and routing continues down the tier chains, so a stale pool entry costs
+nothing but a wasted slot.
+
 ## Configuration reference
 
 | Key | Default | Purpose |
@@ -431,6 +469,7 @@ entirely when a model's pricing is unknown, so it never blocks on guesses. Set
 | `routes` | see above | Capability tier candidate chains |
 | `kindModels` | see above | Task-specialist chains with `minTier` |
 | `kindMinimumTier` | see above | Per-kind floor tier |
+| `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |

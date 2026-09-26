@@ -116,6 +116,10 @@ function formatTokens(tokens: number | undefined): string {
 function targetForModel(config: JevRouterConfig, model: AvailableModel): RouteTarget {
   const match = (chain: readonly RouteTarget[]) =>
     chain.find((t) => t.provider === model.provider && t.model === model.id);
+  if (config.free.enabled) {
+    const target = match(config.free.pool);
+    if (target) return target;
+  }
   for (const tier of TIERS) {
     const target = match(config.routes[tier]);
     if (target) return target;
@@ -191,18 +195,24 @@ export function decide(
     }
   }
 
-  // Candidate order: kind specialists for the chosen tier, then the tier chain,
-  // then neighbouring tiers (nearest first) so an unavailable model never blocks routing.
-  // Specialists are ranked by how close their `minTier` is to the chosen tier, so a
-  // cheap specialist does not win a premium-quality turn.
+  // Candidate order: the free pool (when `prefer`), then kind specialists for the
+  // chosen tier, then the tier chain, then neighbouring tiers (nearest first) so an
+  // unavailable model never blocks routing. Specialists are ranked by how close their
+  // `minTier` is to the chosen tier, so a cheap specialist does not win a premium-quality
+  // turn. The free pool is config, not a tier, so it never displaces the judgment: when
+  // `fallback-only` it is appended after every tier chain instead.
+  const freePool = config.free.enabled ? config.free.pool : [];
   const kindChain = (config.kindModels[analysis.kind] ?? [])
     .filter((target) => tierIndex(target.minTier) <= index)
     .sort((a, b) => tierIndex(b.minTier) - tierIndex(a.minTier));
-  const ordered: RouteTarget[] = [...kindChain, ...config.routes[TIERS[index]]];
+  const ordered: RouteTarget[] = [];
+  if (config.free.policy === "prefer") ordered.push(...freePool);
+  ordered.push(...kindChain, ...config.routes[TIERS[index]]);
   for (let offset = 1; offset < TIERS.length; offset += 1) {
     if (index - offset >= 0) ordered.push(...config.routes[TIERS[index - offset]]);
     if (index + offset < TIERS.length) ordered.push(...config.routes[TIERS[index + offset]]);
   }
+  if (config.free.policy === "fallback-only") ordered.push(...freePool);
 
   const available = firstAvailable(options.models, ordered);
   if (!available) return undefined;
@@ -213,6 +223,9 @@ export function decide(
   const usedKindChain = kindChain.some(
     (t) => t.provider === available.target.provider && t.model === available.target.model,
   );
+  if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
+    notes.push(`free pool → ${available.model.id}`);
+  }
   const effectiveIndex = usedKindChain
     ? index
     : Math.max(

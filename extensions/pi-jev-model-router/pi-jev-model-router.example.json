@@ -105,5 +105,13 @@
     "research": "standard",
     "plan": "high",
     "review": "high"
+  },
+  "free": {
+    "enabled": true,
+    "policy": "prefer",
+    "pool": [
+      { "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" },
+      { "provider": "opencode-go", "model": "longcat-2.5-preview-free", "thinkingLevel": "medium" }
+    ]
   }
 }
