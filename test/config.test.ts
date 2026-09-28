@@ -79,6 +79,20 @@ describe("loadConfig", () => {
     expect(config.routes.standard).toEqual(DEFAULT_CONFIG.routes.standard);
   });
 
+  test("kind specialist priority keeps finite numbers and drops junk", () => {
+    writeProject({
+      kindModels: {
+        write: [
+          { ...modelA, priority: 2 },
+          { ...modelB, priority: "high" },
+          { provider: "testprov", model: "model-c", priority: null },
+          { provider: "testprov", model: "model-d", priority: -1 },
+        ],
+      },
+    });
+    expect(loadConfig(cwd).kindModels.write.map((t) => t.priority)).toEqual([2, undefined, undefined, -1]);
+  });
+
   test("kindModels override replaces only the named kind and can add new kinds", () => {
     writeProject({ kindModels: { plan: [modelA], custom: [modelB] } });
     const config = loadConfig(cwd);
