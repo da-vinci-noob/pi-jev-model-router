@@ -228,16 +228,15 @@ export function decide(
   if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
     notes.push(`free pool → ${available.model.id}`);
   }
-  const effectiveIndex = usedKindChain
-    ? index
-    : Math.max(
-        index,
-        TIERS.findIndex((tier) =>
-          config.routes[tier].some(
-            (t) => t.provider === available.target.provider && t.model === available.target.model,
-          ),
+  const servingTiers = usedKindChain
+    ? []
+    : TIERS.map((_, i) => i).filter((i) =>
+        config.routes[TIERS[i]].some(
+          (t) => t.provider === available.target.provider && t.model === available.target.model,
         ),
       );
+  const effectiveIndex =
+    servingTiers.sort((a, b) => Math.abs(a - index) - Math.abs(b - index) || a - b)[0] ?? index;
   if (effectiveIndex !== index) {
     notes.push(`${TIERS[index]} chain unavailable → ${TIERS[effectiveIndex]}`);
     downgraded = effectiveIndex < index;

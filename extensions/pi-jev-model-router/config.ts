@@ -26,7 +26,7 @@ export interface RouteTarget {
   thinkingLevel?: ThinkingLevel;
   /**
    * Only used inside `kindModels`: this model may serve the kind when the
-   * chosen tier is at or above `minTier`. Defaults to "quick".
+   * chosen tier is at or above `minTier`. Defaults to "standard".
    */
   minTier?: Tier;
 }

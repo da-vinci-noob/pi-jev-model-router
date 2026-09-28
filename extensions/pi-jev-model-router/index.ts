@@ -261,7 +261,7 @@ async function analyse(
   if (runtime.models.length === 0) runtime.models = toAvailable(ctx);
   const spend = spendSnapshot(runtime.ledger, config.budget);
   // Context size prices the cache miss a switch would cause.
-  const contextTokens = ctx.getContextUsage?.()?.tokens;
+  const contextTokens = ctx.getContextUsage?.()?.tokens ?? undefined;
   const activeKey = currentModelKey(ctx);
 
   const analysis = await classifyRequest(
@@ -742,7 +742,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await analyse(params.request, ctx, runtime);
       if ("error" in result) {
-        return { content: [{ type: "text", text: `jev_route error: ${result.error}` }], isError: true };
+        return { content: [{ type: "text", text: `jev_route error: ${result.error}` }], details: undefined, isError: true };
       }
       const { analysis, decision } = result;
       const text = [
