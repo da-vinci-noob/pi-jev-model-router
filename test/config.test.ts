@@ -8,7 +8,7 @@ const fakeHome = mkdtempSync(join(realOs.tmpdir(), "jev-config-home-"));
 mock.module("node:os", () => ({ ...osCopy, homedir: () => fakeHome }));
 // Dynamic import: config must load after the node:os mock so the global file lives in fakeHome.
 
-const { DEFAULT_CONFIG, apiKeyFor, hasApiKey, loadConfig } = await import("../extensions/pi-jev-model-router/config");
+const { DEFAULT_CONFIG, TASK_KINDS, apiKeyFor, hasApiKey, loadConfig } = await import("../extensions/pi-jev-model-router/config");
 
 const ENV_KEYS = ["TYPESAFE_API_KEY", "JEV_ROUTER_MODE", "JEV_ROUTER_OFF"] as const;
 const globalFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.json");
@@ -145,6 +145,26 @@ describe("loadConfig", () => {
   test("kindMinimumTier partial override keeps the other floors", () => {
     writeProject({ kindMinimumTier: { chat: "standard" } });
     expect(loadConfig(cwd).kindMinimumTier).toEqual({ ...DEFAULT_CONFIG.kindMinimumTier, chat: "standard" });
+  });
+
+  test("taskKinds default to the built-in kinds", () => {
+    expect(loadConfig(cwd).taskKinds).toEqual(TASK_KINDS);
+  });
+
+  test("taskKinds add new kinds and override descriptions, project over global", () => {
+    writeGlobal({ taskKinds: { data: "global data", infra: "Provisioning or changing infrastructure" } });
+    writeProject({ taskKinds: { data: "Querying or transforming datasets", plan: "Custom planning text" } });
+    expect(loadConfig(cwd).taskKinds).toEqual({
+      ...TASK_KINDS,
+      plan: "Custom planning text",
+      data: "Querying or transforming datasets",
+      infra: "Provisioning or changing infrastructure",
+    });
+  });
+
+  test("taskKinds ignore entries without a non-empty string description", () => {
+    writeProject({ taskKinds: { data: "", legal: 3, ops: null, plan: "   ", infra: "Provisioning infra" } });
+    expect(loadConfig(cwd).taskKinds).toEqual({ ...TASK_KINDS, infra: "Provisioning infra" });
   });
 
   test("free pool merges valid fields", () => {

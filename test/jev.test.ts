@@ -129,6 +129,15 @@ describe("classifyRequest parsing", () => {
     expect(error).toBeInstanceOf(JevError);
     expect((error as JevError).message).toContain("juggle");
   });
+
+  test("configured task kinds are sent to Jev and accepted back", async () => {
+    const withData = { ...config, taskKinds: { ...config.taskKinds, data: "Querying or transforming datasets" } };
+    stubFetch(ok({ answers: { ...answers, task_kind: { choice: "data", confidence: 0.7 } } }));
+    const analysis = await classifyRequest(input, withData, "k");
+    expect(analysis.kind).toBe("data");
+    const criteria = JSON.parse(String(calls[0].init.body)).questions.task_kind.criteria;
+    expect(criteria).toEqual(withData.taskKinds);
+  });
 });
 
 describe("classifyRequest retries and errors", () => {
