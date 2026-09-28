@@ -79,7 +79,7 @@ export interface JevRouterConfig {
   apiKeyEnv: string;
   apiKey?: string;
   endpointEnv: string;
-  endpoint?: string;
+  endpoint: string;
   jevModel: string;
   timeoutMs: number;
   minPromptChars: number;
@@ -109,6 +109,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
   useDefaultModels: true,
   apiKeyEnv: "TYPESAFE_API_KEY",
   endpointEnv: "TYPESAFE_API_URL",
+  endpoint: "https://api.typesafe.ai/v1/systemone",
   jevModel: "jev-latest",
   timeoutMs: 3500,
   minPromptChars: 12,
