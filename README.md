@@ -298,9 +298,27 @@ the same chain.
 ```
 
 `minTier` gates a model to a minimum capability tier, so a specialist is only
-used when the judgment justifies it. Among eligible specialists, the one whose
-`minTier` is closest to the chosen tier wins — a cheap specialist never wins a
-premium-quality turn.
+used when the judgment justifies it. When priorities tie (the default), the
+eligible specialist whose `minTier` is closest to the chosen tier wins, so a
+cheap specialist does not win a premium-quality turn.
+
+To rank a specialist up without changing when it is eligible, give it a
+numeric `priority` (default `0`, higher first). `priority` is compared before
+`minTier`, so this keeps a free model eligible from `quick` and still tries it
+ahead of a paid `high` specialist:
+
+```json
+{
+  "kindModels": {
+    "write": [
+      { "provider": "opencode-go", "model": "space-bunny-free", "minTier": "quick", "priority": 1 },
+      { "provider": "openrouter", "model": "~anthropic/claude-sonnet-latest", "minTier": "high" }
+    ]
+  }
+}
+```
+
+Without any `priority`, ordering is exactly as before.
 
 ### 4. Set the floor per task kind
 
@@ -472,7 +490,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `confidenceThreshold` | `0.34` | Below this, fall back to `standard` instead of spending premium |
 | `stickiness` | `true` | Keep the current model when it is already the chosen one |
 | `routes` | see above | Capability tier candidate chains |
-| `kindModels` | see above | Task-specialist chains with `minTier` |
+| `kindModels` | see above | Task-specialist chains with `minTier` (gate) and optional `priority` (rank) |
 | `kindMinimumTier` | see above | Per-kind floor tier |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `budget` | no caps | Spend policy |

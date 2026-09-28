@@ -29,6 +29,8 @@ export interface RouteTarget {
    * chosen tier is at or above `minTier`. Defaults to "standard".
    */
   minTier?: Tier;
+  /** Only used inside `kindModels`: higher wins among eligible specialists. Defaults to 0. */
+  priority?: number;
 }
 
 /** A tier maps to an ordered candidate chain; the first available model wins. */
@@ -278,7 +280,10 @@ function normalizeChain(value: unknown): RouteChain | undefined {
     (item): item is RouteTarget =>
       Boolean(item) && typeof item === "object" && typeof (item as RouteTarget).provider === "string" && typeof (item as RouteTarget).model === "string",
   );
-  return targets.length > 0 ? targets : undefined;
+  if (targets.length === 0) return undefined;
+  return targets.map((t) =>
+    t.priority === undefined || Number.isFinite(t.priority) ? t : { ...t, priority: undefined },
+  );
 }
 
 function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {

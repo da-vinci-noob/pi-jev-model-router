@@ -133,8 +133,9 @@ project-specific routes. Later sources win: defaults → global → project → 
    your key can't afford it.
 2. **`kindModels`** is the *task axis*. A kind-specialist chain is tried before
    the generic tier chain, filtered by `minTier`. Eligible specialists are ranked
-   by how close their `minTier` is to the chosen tier, so a cheap specialist never
-   wins a premium-quality turn. This is how planning can land on a strong reasoner
+   by `priority` (default `0`, higher first), then by how close their `minTier`
+   is to the chosen tier, so a cheap specialist never wins a premium-quality turn
+   unless you rank it up. This is how planning can land on a strong reasoner
    while implementation lands on a coding specialist.
 
 Rules of thumb baked into the defaults:

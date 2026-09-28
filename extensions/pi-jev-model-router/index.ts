@@ -25,6 +25,7 @@ import {
 import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
 import {
   decide,
+  describeKindRoutes,
   describeDecision,
   findModel,
   firstAvailable,
@@ -693,10 +694,12 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             "",
             `kind specialists (${Object.keys(runtime.config.kindModels).length}):`,
             ...Object.entries(runtime.config.kindModels).map(([kind, chain]) => {
-              const pick = firstAvailable(runtime.models, chain);
-              const floor = runtime.config.kindMinimumTier[kind] ?? "quick";
-              return `  ${pick ? "✓" : "✗"} ${kind.padEnd(10)} ≥${floor.padEnd(9)} ${pick ? pick.model.id : (chain[0]?.model ?? "(none configured)")}`;
+              const ok = firstAvailable(runtime.models, chain) !== undefined;
+              return `  ${ok ? "✓" : "✗"} ${kind.padEnd(10)} ${describeKindRoutes(runtime.config, runtime.models, kind)}`;
             }),
+            runtime.config.free.enabled
+              ? `  free pool (${runtime.config.free.policy}, ${runtime.config.free.pool.length} configured) is tried ${runtime.config.free.policy === "prefer" ? "before these" : "after every tier"}`
+              : "  free pool: off",
             "",
             runtime.lastDecision ? `last: ${describeDecision(runtime.lastDecision)}` : "last: none",
             "",

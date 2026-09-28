@@ -5,9 +5,11 @@ import {
   type AvailableModel,
   type DecideOptions,
   decide,
+  describeKindRoutes,
   estimateCachePenaltyUsd,
   findModel,
   firstAvailable,
+  kindCandidates,
   tierForModel,
 } from "../extensions/pi-jev-model-router/router";
 
@@ -190,6 +192,56 @@ describe("decide: kind specialists", () => {
     const d = run({ kind: "implement" }, { kindModels: { implement: [spec("spec-std", "standard")] } });
     expect(d.model?.id).toBe("model-s1");
     expect(d.kindSpecialised).toBe(false);
+  });
+
+  test("priority outranks a closer minTier without widening eligibility", () => {
+    const ranked = {
+      implement: [spec("spec-high", "high"), { ...spec("spec-quick", "quick"), priority: 1 }],
+    };
+    expect(run({ kind: "implement", ...highDemand }, { kindModels: ranked }, { models }).model?.id).toBe("spec-quick");
+    expect(run({ kind: "implement", complexity: 0, budgetIntensity: 0 }, { kindModels: ranked }, { models }).model?.id).toBe(
+      "spec-quick",
+    );
+    const gated = { implement: [{ ...spec("spec-high", "high"), priority: 5 }, spec("spec-std", "standard")] };
+    expect(run({ kind: "implement" }, { kindModels: gated }, { models }).model?.id).toBe("spec-std");
+  });
+
+  test("equal priorities fall back to closest minTier", () => {
+    const tied = { implement: kindModels.implement.map((t) => ({ ...t, priority: 3 })) };
+    expect(run({ kind: "implement", ...highDemand }, { kindModels: tied }, { models }).model?.id).toBe("spec-high");
+  });
+});
+
+describe("describeKindRoutes", () => {
+  const spec = (id: string, minTier: NonNullable<RouteTarget["minTier"]>, priority?: number): RouteTarget => ({
+    provider: P,
+    model: id,
+    minTier,
+    priority,
+  });
+  const models = [...ALL, model("spec-std"), model("spec-high"), model("spec-free")];
+
+  test("lists the winner per tier from the kind floor up, merging runs", () => {
+    const c = config({
+      kindModels: { implement: [spec("spec-std", "standard"), spec("spec-high", "high")] },
+      kindMinimumTier: { implement: "quick" },
+    });
+    expect(describeKindRoutes(c, models, "implement")).toBe(
+      "quick: tier chain · standard: spec-std · high–premium: spec-high",
+    );
+  });
+
+  test("reflects priority and matches what decide() picks at each tier", () => {
+    const c = config({
+      kindModels: { write: [spec("spec-high", "high"), spec("spec-free", "quick", 1)] },
+      kindMinimumTier: { write: "quick" },
+    });
+    expect(describeKindRoutes(c, models, "write")).toBe("quick–premium: spec-free");
+    for (let i = 0; i < 4; i += 1) {
+      const pick = firstAvailable(models, kindCandidates(c, "write", i));
+      const d = decide(analysis({ kind: "write", complexity: i, budgetIntensity: i }), c, options({ models }));
+      expect(d?.model?.id).toBe(pick?.model.id);
+    }
   });
 });
 
