@@ -545,6 +545,17 @@ pi -ne -e "$PWD" -p "Explain what an idempotency key does."
 cp -R extensions/pi-jev-model-router ~/.pi/agent/extensions/
 ```
 
+Tests and typecheck (the same checks CI runs on every PR):
+
+```bash
+bun install
+bun run typecheck   # tsc against the real pi ExtensionAPI types
+bun test            # router, config, Jev client, budget, and extension load/route tests
+```
+
+Tests never hit the network (`fetch` is stubbed) and never read your real
+`~/.pi` config (`os.homedir` is pointed at a temp dir).
+
 Layout:
 
 | File | Role |

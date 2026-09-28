@@ -20,6 +20,10 @@
   ],
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "bun test"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/da-vinci-noob/pi-jev-model-router.git"
@@ -49,5 +53,12 @@
     "@earendil-works/pi-tui": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@earendil-works/pi-tui": "^0.87.1",
+    "@types/bun": "^1.4.2",
+    "typebox": "^1.3.34",
+    "typescript": "^7.0.2"
   }
 }
