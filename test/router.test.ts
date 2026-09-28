@@ -25,6 +25,7 @@ const s1 = model("model-s1", { input: 3, output: 15, cacheRead: 0.3, cacheWrite:
 const s2 = model("model-s2", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 const h1 = model("model-h1", { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 0 });
 const p1 = model("model-p1", { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 0 });
+const x1 = model("model-x1", { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
 const ALL = [q1, q2, s1, s2, h1, p1];
 
 function config(overrides: Partial<JevRouterConfig> = {}): JevRouterConfig {
@@ -41,6 +42,7 @@ function config(overrides: Partial<JevRouterConfig> = {}): JevRouterConfig {
       ],
       high: [{ provider: P, model: "model-h1", thinkingLevel: "medium" }],
       premium: [{ provider: P, model: "model-p1", thinkingLevel: "high" }],
+      xpremium: [],
     },
     kindModels: {},
     kindMinimumTier: {},
@@ -383,6 +385,122 @@ describe("findModel / firstAvailable", () => {
     expect(hit?.model).toBe(h1);
     expect(hit?.target).toBe(chain[1]);
     expect(firstAvailable(ALL, [{ provider: P, model: "missing" }])).toBeUndefined();
+  });
+});
+
+describe("decide: xpremium tier", () => {
+  const models = [...ALL, x1];
+  const xpremium = [{ provider: P, model: "model-x1", thinkingLevel: "high" as const }];
+  const on = (extra: Partial<JevRouterConfig> = {}): Partial<JevRouterConfig> => ({
+    routes: { ...config().routes, xpremium },
+    ...extra,
+  });
+
+  test("an empty xpremium chain is off: premium demand stays on premium", () => {
+    const d = run(premiumDemand, {}, { models });
+    expect(d.tier).toBe("premium");
+    expect(d.model?.id).toBe("model-p1");
+  });
+
+  test("a configured chain serves confident premium demand", () => {
+    const d = run(premiumDemand, on(), { models });
+    expect(d.desiredTier).toBe("xpremium");
+    expect(d.tier).toBe("xpremium");
+    expect(d.tierIndex).toBe(4);
+    expect(d.model?.id).toBe("model-x1");
+  });
+
+  test("demand below premium never reaches xpremium", () => {
+    expect(run(highDemand, on(), { models }).model?.id).toBe("model-h1");
+  });
+
+  test("kind confidence must be known and at least the threshold", () => {
+    const threshold = DEFAULT_CONFIG.confidenceThreshold;
+    expect(run({ ...premiumDemand, kindConfidence: threshold }, on(), { models }).tier).toBe("xpremium");
+    expect(run({ ...premiumDemand, kindConfidence: 0 }, on(), { models }).tier).toBe("premium");
+  });
+
+  test("the fallback search never spills into xpremium when the turn is not eligible", () => {
+    expect(run({ ...premiumDemand, kindConfidence: 0 }, on(), { models: [h1, x1] }).model?.id).toBe("model-h1");
+    expect(decide(analysis(highDemand), config(on()), options({ models: [x1] }))).toBeUndefined();
+  });
+
+  test("budget pressure steps an eligible turn down to premium", () => {
+    const d = run(premiumDemand, on(), { models, spend: { today: 1, month: 1, pressure: 0.75 } });
+    expect(d.tier).toBe("premium");
+    expect(d.downgraded).toBe(true);
+  });
+
+  test("an eligible turn falls back to premium when no xpremium model is available", () => {
+    const d = run(premiumDemand, on(), { models: ALL });
+    expect(d.tier).toBe("premium");
+    expect(d.model?.id).toBe("model-p1");
+    expect(d.downgraded).toBe(true);
+    expect(d.notes).toContain("xpremium chain unavailable → premium");
+  });
+
+  test("kindMinimumTier xpremium is capped at premium", () => {
+    const d = run({ kind: "plan", complexity: 0, budgetIntensity: 0 }, on({ kindMinimumTier: { plan: "xpremium" } }), { models });
+    expect(d.tier).toBe("premium");
+  });
+
+  test("a specialist gated at xpremium only serves xpremium turns", () => {
+    const kindModels = { plan: [{ provider: P, model: "spec-x", minTier: "xpremium" as const }] };
+    const withSpec = [...models, model("spec-x")];
+    expect(run({ kind: "plan", ...premiumDemand }, on({ kindModels }), { models: withSpec }).model?.id).toBe("spec-x");
+    expect(run({ kind: "plan", ...premiumDemand, kindConfidence: 0 }, on({ kindModels }), { models: withSpec }).model?.id).toBe(
+      "model-p1",
+    );
+  });
+
+  test("tierForModel and the status line know the xpremium tier only when it is configured", () => {
+    expect(tierForModel(`${P}/model-x1`, config(on()))).toBe(4);
+    const kindModels = { plan: [{ provider: P, model: "spec-p", minTier: "premium" as const }] };
+    const statusModels = [...models, model("spec-p")];
+    expect(describeKindRoutes(config({ kindModels, kindMinimumTier: { plan: "premium" } }), statusModels, "plan")).toBe(
+      "premium: spec-p",
+    );
+    expect(describeKindRoutes(config(on({ kindModels, kindMinimumTier: { plan: "premium" } })), statusModels, "plan")).toBe(
+      "premium–xpremium: spec-p",
+    );
+  });
+});
+
+describe("decide: xpremium and the cache guard", () => {
+  const models = [...ALL, x1];
+  const on: Partial<JevRouterConfig> = {
+    routes: { ...config().routes, xpremium: [{ provider: P, model: "model-x1" }] },
+    cache: { aware: true, deadband: 0.25, maxPenaltyUsd: 0.05, bypassTierDelta: 2 },
+  };
+
+  test("an eligible turn upgrades from warm premium when the cache penalty is affordable", () => {
+    const d = run(premiumDemand, on, { models, contextTokens: 1_000, current: { index: 3, model: p1 } });
+    expect(d.held).toBeUndefined();
+    expect(d.model).toBe(x1);
+  });
+
+  test("an eligible turn holds on premium when the cache penalty is too high", () => {
+    const d = run(premiumDemand, on, { models, contextTokens: 1_000_000, current: { index: 3, model: p1 } });
+    expect(d.held).toBe(true);
+    expect(d.model).toBe(p1);
+  });
+
+  test("the cache guard never holds on xpremium for a turn that is not eligible", () => {
+    const wide = { ...on, cache: { ...on.cache!, deadband: 0.6 } };
+    const d = run({ ...premiumDemand, kindConfidence: 0 }, wide, { models, contextTokens: 1_000, current: { index: 4, model: x1 } });
+    expect(d.model).toBe(p1);
+    expect(d.held).toBeUndefined();
+  });
+
+  test("budget pressure moves off xpremium even when the cache guard would hold", () => {
+    const d = run(premiumDemand, on, {
+      models,
+      contextTokens: 1_000,
+      current: { index: 4, model: x1 },
+      spend: { today: 1, month: 1, pressure: 0.75 },
+    });
+    expect(d.model).toBe(p1);
+    expect(d.held).toBeUndefined();
   });
 });
 

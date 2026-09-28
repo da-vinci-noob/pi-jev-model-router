@@ -169,6 +169,7 @@ single provider id. Four capability tiers, each an ordered fallback chain:
 | `standard` | `~deepseek/deepseek-pro-latest` → `openai/gpt-5.4-mini` → `~z-ai/glm-latest` |
 | `high` | `~anthropic/claude-sonnet-latest` → `~openai/gpt-terra-latest` → `~google/gemini-pro-latest` → `~x-ai/grok-latest` |
 | `premium` | `~anthropic/claude-opus-latest` → `openai/gpt-5.5` → `~openai/gpt-astra-latest` |
+| `xpremium` | empty: off until you configure it (see [Extra-premium tier](#extra-premium-tier)) |
 
 Plus kind specialists, tried before the tier chain when the chosen tier is high
 enough (`minTier`):
@@ -431,6 +432,31 @@ entirely when a model's pricing is unknown, so it never blocks on guesses. Set
 }
 ```
 
+## Extra-premium tier
+
+`xpremium` sits above `premium` for the most expensive model class (around
+$50 / 1M output tokens). It is **off until you give it a chain**, and the
+built-in models never fill it:
+
+```json
+{
+  "routes": {
+    "xpremium": [{ "provider": "openrouter", "model": "~openai/gpt-astra-latest", "thinkingLevel": "high" }]
+  }
+}
+```
+
+The demand scale is unchanged, so no prompt that routes to `premium` today
+moves up on its own. A turn is promoted to `xpremium` only when all of these hold:
+
+- demand already lands on `premium`
+- Jev's kind confidence is known and at least `confidenceThreshold`
+- the budget guards don't step it down (soft pressure drops it back to `premium`)
+
+Otherwise the `xpremium` chain is never tried, not even as a fallback when
+`premium` is unavailable. `kindMinimumTier: "xpremium"` is treated as `premium`.
+A kind specialist with `minTier: "xpremium"` only serves promoted turns.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -489,7 +515,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `historyTurns` | `4` | Conversation turns included as Jev state |
 | `confidenceThreshold` | `0.34` | Below this, fall back to `standard` instead of spending premium |
 | `stickiness` | `true` | Keep the current model when it is already the chosen one |
-| `routes` | see above | Capability tier candidate chains |
+| `routes` | see above | Capability tier candidate chains; `xpremium` is empty (off) unless you set it |
 | `kindModels` | see above | Task-specialist chains with `minTier` (gate) and optional `priority` (rank) |
 | `kindMinimumTier` | see above | Per-kind floor tier |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |

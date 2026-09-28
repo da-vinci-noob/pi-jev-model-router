@@ -62,6 +62,12 @@ describe("loadConfig", () => {
     expect(config.routes.premium).toEqual(DEFAULT_CONFIG.routes.premium);
   });
 
+  test("xpremium is empty by default and only filled from config", () => {
+    expect(loadConfig(cwd).routes.xpremium).toEqual([]);
+    writeProject({ routes: { xpremium: [modelA] } });
+    expect(loadConfig(cwd).routes.xpremium).toEqual([modelA]);
+  });
+
   test("a single route object is accepted as a one-entry chain", () => {
     writeProject({ routes: { quick: modelA } });
     expect(loadConfig(cwd).routes.quick).toEqual([modelA]);
@@ -104,7 +110,7 @@ describe("loadConfig", () => {
   test("useDefaultModels false empties built-in chains but keeps non-model defaults", () => {
     writeProject({ useDefaultModels: false, routes: { standard: [modelA] } });
     const config = loadConfig(cwd);
-    expect(config.routes).toEqual({ quick: [], standard: [modelA], high: [], premium: [] });
+    expect(config.routes).toEqual({ quick: [], standard: [modelA], high: [], premium: [], xpremium: [] });
     expect(config.kindModels).toEqual({});
     expect(config.endpoint).toBe(DEFAULT_CONFIG.endpoint);
     expect(config.kindMinimumTier).toEqual(DEFAULT_CONFIG.kindMinimumTier);
@@ -125,7 +131,7 @@ describe("loadConfig", () => {
     writeGlobal({ useDefaultModels: false });
     writeProject({ routes: { quick: [modelA] } });
     const config = loadConfig(cwd);
-    expect(config.routes).toEqual({ quick: [modelA], standard: [], high: [], premium: [] });
+    expect(config.routes).toEqual({ quick: [modelA], standard: [], high: [], premium: [], xpremium: [] });
     expect(config.kindModels).toEqual({});
   });
 

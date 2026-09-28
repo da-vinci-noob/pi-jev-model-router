@@ -503,7 +503,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       );
     }
     if (runtime.config.enabled && !runtime.config.useDefaultModels) {
-      const emptyTiers = TIERS.filter((tier) => runtime.config.routes[tier].length === 0);
+      const emptyTiers = TIERS.filter((tier) => tier !== "xpremium" && runtime.config.routes[tier].length === 0);
       if (emptyTiers.length > 0) {
         notify(
           ctx,
@@ -684,7 +684,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             "routes:",
             ...TIERS.map((tier) => {
               const route = runtime.config.routes[tier];
-              if (route.length === 0) return `  ✗ ${tier.padEnd(9)} (none configured)`;
+              if (route.length === 0) return tier === "xpremium" ? `    ${tier.padEnd(9)} (off)` : `  ✗ ${tier.padEnd(9)} (none configured)`;
               const pick = firstAvailable(runtime.models, route);
               const marker = pick ? "✓" : "✗";
               const label = pick ? `${pick.model.provider}/${pick.model.id}` : `${route[0]?.provider}/${route[0]?.model}`;

@@ -160,4 +160,11 @@ describe("pi extension", () => {
     await input("add a retry to the upload client");
     expect(fetchCalls).toHaveLength(0);
   });
+
+  test("session start does not warn about an unconfigured xpremium tier", async () => {
+    stubFetch(() => Response.json(jevAnswers()));
+    const { notes } = await load();
+
+    expect(notes.filter(([text]) => text.includes("no models are configured"))).toEqual([]);
+  });
 });
