@@ -118,7 +118,7 @@ project-specific routes. Later sources win: defaults → global → project → 
   },
   "kindMinimumTier": { "plan": "high", "review": "high", "implement": "standard" },
   "free": {
-    "enabled": true,
+    "enabled": false,
     "policy": "prefer",
     "pool": [{ "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" }]
   }

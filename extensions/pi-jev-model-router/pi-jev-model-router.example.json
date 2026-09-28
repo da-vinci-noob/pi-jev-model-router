@@ -107,7 +107,7 @@
     "review": "high"
   },
   "free": {
-    "enabled": true,
+    "enabled": false,
     "policy": "prefer",
     "pool": [
       { "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" },

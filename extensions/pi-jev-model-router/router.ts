@@ -201,7 +201,9 @@ export function decide(
   // `minTier` is to the chosen tier, so a cheap specialist does not win a premium-quality
   // turn. The free pool is config, not a tier, so it never displaces the judgment: when
   // `fallback-only` it is appended after every tier chain instead.
-  const freePool = config.free.enabled ? config.free.pool : [];
+  const freePool = config.free.enabled
+    ? config.free.pool.filter((t) => options.models.some((m) => m.provider === t.provider && m.id === t.model))
+    : [];
   const kindChain = (config.kindModels[analysis.kind] ?? [])
     .filter((target) => tierIndex(target.minTier) <= index)
     .sort((a, b) => tierIndex(b.minTier) - tierIndex(a.minTier));
