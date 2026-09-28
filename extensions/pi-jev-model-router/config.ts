@@ -67,6 +67,32 @@ export interface CacheConfig {
   bypassTierDelta: number;
 }
 
+/**
+ * Where a pool of zero-cost models sits relative to the tier chains.
+ *
+ * - `prefer`: try the pool first, then the kind and tier chains.
+ * - `fallback-only`: try the pool last, after every tier chain.
+ */
+export type FreePolicy = "prefer" | "fallback-only";
+
+/**
+ * A pool of free models, consulted outside the tier scale.
+ *
+ * Tiers describe capability, not price, so there is nowhere in `TIERS` to put a
+ * free model. Adding a `free` tier would collide with the demand math in
+ * `decide()`, which rounds onto the existing four. A separate pool keeps the
+ * judgment scale untouched, and it survives providers swapping their free
+ * models, since the pool is plain config rather than a new tier.
+ */
+export interface FreePoolConfig {
+  /** Master switch. When false the pool is ignored and routing is unchanged. */
+  enabled: boolean;
+  /** Whether the pool is tried before or after the tier chains. */
+  policy: FreePolicy;
+  /** Candidate chain, tried in order. The first available model wins. */
+  pool: RouteChain;
+}
+
 export interface JevRouterConfig {
   enabled: boolean;
   mode: Mode;
@@ -99,6 +125,11 @@ export interface JevRouterConfig {
   kindModels: Record<string, RouteChain>;
   /** Floor tier per task kind, so e.g. planning never lands on the quick model. */
   kindMinimumTier: Record<string, Tier>;
+  /**
+   * Zero-cost models tried outside the tier scale. Disabled by default, so an
+   * existing config routes exactly as before.
+   */
+  free: FreePoolConfig;
   budget: BudgetConfig;
   cache: CacheConfig;
 }
@@ -220,6 +251,11 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     maxPenaltyUsd: 0.05,
     bypassTierDelta: 2,
   },
+  free: {
+    enabled: false,
+    policy: "prefer",
+    pool: [],
+  },
 };
 
 function readJson(path: string): unknown | undefined {
@@ -258,11 +294,22 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     const chain = normalizeChain(value);
     if (chain) kindModels[kind] = chain;
   }
+  const freePatch = asRecord(p.free);
+  const freePool = normalizeChain(freePatch.pool);
+  const free: FreePoolConfig = {
+    enabled: typeof freePatch.enabled === "boolean" ? freePatch.enabled : base.free.enabled,
+    policy:
+      freePatch.policy === "prefer" || freePatch.policy === "fallback-only"
+        ? freePatch.policy
+        : base.free.policy,
+    pool: freePool ?? base.free.pool,
+  };
   return {
     ...base,
     ...(p as Partial<JevRouterConfig>),
     routes,
     kindModels,
+    free,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {

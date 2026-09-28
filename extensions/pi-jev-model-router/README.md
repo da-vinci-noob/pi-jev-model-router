@@ -116,7 +116,12 @@ project-specific routes. Later sources win: defaults → global → project → 
   "kindModels": {
     "implement": [{ "provider": "openrouter", "model": "openai/gpt-5.3-codex", "minTier": "standard" }]
   },
-  "kindMinimumTier": { "plan": "high", "review": "high", "implement": "standard" }
+  "kindMinimumTier": { "plan": "high", "review": "high", "implement": "standard" },
+  "free": {
+    "enabled": true,
+    "policy": "prefer",
+    "pool": [{ "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" }]
+  }
 }
 ```
 
