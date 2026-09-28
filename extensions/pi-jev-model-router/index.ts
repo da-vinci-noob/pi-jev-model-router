@@ -695,7 +695,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             ...Object.entries(runtime.config.kindModels).map(([kind, chain]) => {
               const pick = firstAvailable(runtime.models, chain);
               const floor = runtime.config.kindMinimumTier[kind] ?? "quick";
-              return `  ${pick ? "✓" : "✗"} ${kind.padEnd(10)} ≥${floor.padEnd(9)} ${pick ? pick.model.id : (chain[0]?.model ?? "(none configured)")}`;
+              const model = pick ? pick.model.id : (chain[0]?.model ?? "(none configured)");
+              const gate = (pick?.target ?? chain[0])?.minTier ?? "quick";
+              return `  ${pick ? "✓" : "✗"} ${kind.padEnd(10)} floor ${floor.padEnd(9)} ${model} (≥${gate})`;
             }),
             "",
             runtime.lastDecision ? `last: ${describeDecision(runtime.lastDecision)}` : "last: none",

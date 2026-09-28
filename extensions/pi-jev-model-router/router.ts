@@ -197,16 +197,17 @@ export function decide(
 
   // Candidate order: the free pool (when `prefer`), then kind specialists for the
   // chosen tier, then the tier chain, then neighbouring tiers (nearest first) so an
-  // unavailable model never blocks routing. Specialists are ranked by how close their
-  // `minTier` is to the chosen tier, so a cheap specialist does not win a premium-quality
-  // turn. The free pool is config, not a tier, so it never displaces the judgment: when
+  // unavailable model never blocks routing. Specialists are ranked by `priority` (higher
+  // first), then by how close their `minTier` is to the chosen tier, so a cheap specialist
+  // does not win a premium-quality turn unless you rank it up.
+  // The free pool is config, not a tier, so it never displaces the judgment: when
   // `fallback-only` it is appended after every tier chain instead.
   const freePool = config.free.enabled
     ? config.free.pool.filter((t) => options.models.some((m) => m.provider === t.provider && m.id === t.model))
     : [];
   const kindChain = (config.kindModels[analysis.kind] ?? [])
     .filter((target) => tierIndex(target.minTier) <= index)
-    .sort((a, b) => tierIndex(b.minTier) - tierIndex(a.minTier));
+    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || tierIndex(b.minTier) - tierIndex(a.minTier));
   const ordered: RouteTarget[] = [];
   if (config.free.policy === "prefer") ordered.push(...freePool);
   ordered.push(...kindChain, ...config.routes[TIERS[index]]);
