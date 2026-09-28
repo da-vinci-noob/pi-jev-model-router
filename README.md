@@ -421,7 +421,7 @@ entirely when a model's pricing is unknown, so it never blocks on guesses. Set
 | `useDefaultModels` | `true` | `false` drops the built-in model chains so only your config's models are used |
 | `mode` | `"auto"` | `auto` \| `confirm` \| `notify` |
 | `apiKeyEnv` / `apiKey` | `TYPESAFE_API_KEY` | TypeSafe credentials |
-| `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` | API endpoint | https://api.typesafe.ai/v1/systemone |
+| `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` / `https://api.typesafe.ai/v1/systemone` | TypeSafe-compatible evaluation endpoint (non-empty env wins over `endpoint`) |
 | `jevModel` | `"jev-latest"` | Jev model alias |
 | `timeoutMs` | `3500` | Jev request timeout (retries 429/529) |
 | `minPromptChars` | `12` | Below this, a prompt counts as a continuation (a short *first* message is still routed) |
