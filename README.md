@@ -437,8 +437,9 @@ the judgment is untouched and a free model never has to pretend to be a tier.
 - `enabled: false` (the default) ignores the pool entirely, so an existing config
   routes exactly as before.
 
-The pool is a plain candidate chain, so the first available and authenticated model
-wins and an unavailable one simply falls through to the normal chains. When a pool
+Pool entries match on provider and model exactly, so a missing free model never
+falls back to a paid model with the same ID. The first pool entry in the model
+catalogue wins; one that is missing falls through to the normal chains. When a pool
 model wins, the decision still reports the tier Jev judged, plus a
 `free pool → <model>` note, so the transcript shows why the tier and the model
 differ.
@@ -447,9 +448,13 @@ A pool model is not on any tier, so `tierForModel` reports no tier for it and th
 status line falls back to `jev-router:on`. That is deliberate: a free model has no
 capability tier.
 
-Free models are usually temporary. If a provider withdraws one, `firstAvailable`
-skips it and routing continues down the tier chains, so a stale pool entry costs
-nothing but a wasted slot.
+Free models are usually temporary. If a provider withdraws one from the catalogue,
+routing skips it and continues down the chains, so a stale pool entry costs nothing
+but a wasted slot. Only the chosen model is tried: if switching to it fails (for
+example, no auth for the provider), the turn stays on the current model.
+
+Free and preview models may log or train on prompts, and `prefer` sends every turn
+to the pool. Check the provider's data policy before enabling it.
 
 ## Configuration reference
 
