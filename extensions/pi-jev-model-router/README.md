@@ -127,7 +127,7 @@ project-specific routes. Later sources win: defaults → global → project → 
 
 ### Two axes of routing
 
-1. **Tier** (`quick` → `standard` → `high` → `premium`) is the *budget axis*. Each
+1. **Tier** (`quick` → `standard` → `high` → `premium`, plus opt-in `xpremium`) is the *budget axis*. Each
    tier is an ordered **candidate chain**; the first model that is available and
    authenticated wins, so you get automatic fallback when a model is down or
    your key can't afford it.

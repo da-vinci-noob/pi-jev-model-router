@@ -38,6 +38,8 @@ export function tierIndex(tier: Tier | undefined): number {
   return index < 0 ? 1 : index;
 }
 
+const PREMIUM = TIERS.indexOf("premium");
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -74,7 +76,8 @@ export function kindCandidates(config: JevRouterConfig, kind: string, index: num
 /** The specialist that wins at each tier from the kind's floor up, merging runs, e.g. `high: a · premium: b`. */
 export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string): string {
   const spans: { from: Tier; to: Tier; model: string }[] = [];
-  for (let i = tierIndex(config.kindMinimumTier[kind] ?? "quick"); i < TIERS.length; i += 1) {
+  const top = config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM;
+  for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), PREMIUM); i <= top; i += 1) {
     const model = firstAvailable(models, kindCandidates(config, kind, i))?.model.id ?? "tier chain";
     const last = spans[spans.length - 1];
     if (last?.model === model) last.to = TIERS[i];
@@ -172,14 +175,16 @@ export function decide(
   if (analysis.deepReasoning >= 0.65) demand += 0.75;
   else if (analysis.deepReasoning <= 0.2) demand -= 0.25;
   demand = clamp(demand, 0, 3);
+  const demandReachesPremium = Math.round(demand) >= PREMIUM;
 
-  const kindFloor = tierIndex(config.kindMinimumTier[analysis.kind] ?? "quick");
+  const kindFloor = Math.min(tierIndex(config.kindMinimumTier[analysis.kind] ?? "quick"), PREMIUM);
   if (demand < kindFloor) {
     notes.push(`${analysis.kind} floors at ${TIERS[kindFloor]}`);
     demand = kindFloor;
   }
 
-  const desiredIndex = clamp(Math.round(demand), 0, TIERS.length - 1);
+  // Demand tops out at premium; xpremium is reached only through the eligibility check below.
+  let desiredIndex = clamp(Math.round(demand), 0, PREMIUM);
   let index = desiredIndex;
   let lowConfidenceFallback = false;
 
@@ -194,6 +199,17 @@ export function decide(
     index = 1;
     lowConfidenceFallback = true;
   }
+
+  const xpremiumEligible =
+    config.routes.xpremium.length > 0 &&
+    demandReachesPremium &&
+    analysis.kindConfidence > 0 &&
+    analysis.kindConfidence >= config.confidenceThreshold;
+  if (xpremiumEligible) {
+    desiredIndex = PREMIUM + 1;
+    index = desiredIndex;
+  }
+  const tierCount = xpremiumEligible ? TIERS.length : PREMIUM + 1;
 
   // Budget guard: hard pressure forces the cheap tier unless the work is clearly architectural.
   let downgraded = false;
@@ -228,9 +244,9 @@ export function decide(
   const ordered: RouteTarget[] = [];
   if (config.free.policy === "prefer") ordered.push(...freePool);
   ordered.push(...kindChain, ...config.routes[TIERS[index]]);
-  for (let offset = 1; offset < TIERS.length; offset += 1) {
+  for (let offset = 1; offset < tierCount; offset += 1) {
     if (index - offset >= 0) ordered.push(...config.routes[TIERS[index - offset]]);
-    if (index + offset < TIERS.length) ordered.push(...config.routes[TIERS[index + offset]]);
+    if (index + offset < tierCount) ordered.push(...config.routes[TIERS[index + offset]]);
   }
   if (config.free.policy === "fallback-only") ordered.push(...freePool);
 
@@ -248,7 +264,7 @@ export function decide(
   }
   const servingTiers = usedKindChain
     ? []
-    : TIERS.map((_, i) => i).filter((i) =>
+    : TIERS.slice(0, tierCount).map((_, i) => i).filter((i) =>
         config.routes[TIERS[i]].some(
           (t) => t.provider === available.target.provider && t.model === available.target.model,
         ),
@@ -269,13 +285,15 @@ export function decide(
     config.cache.aware &&
     currentIndex !== undefined &&
     currentModel &&
+    (currentIndex <= PREMIUM || index > PREMIUM) &&
     (available.model.provider !== currentModel.provider || available.model.id !== currentModel.id)
   ) {
     const delta = index - currentIndex;
     const penalty = estimateCachePenaltyUsd(options.contextTokens ?? 0, currentModel, available.model);
+    const bandDemand = xpremiumEligible ? desiredIndex : demand;
     const outsideBand =
-      demand < currentIndex - 0.5 - config.cache.deadband ||
-      demand > currentIndex + 0.5 + config.cache.deadband;
+      bandDemand < currentIndex - 0.5 - config.cache.deadband ||
+      bandDemand > currentIndex + 0.5 + config.cache.deadband;
     const bigUpgrade = delta >= config.cache.bypassTierDelta;
     const affordable = penalty <= config.cache.maxPenaltyUsd;
 

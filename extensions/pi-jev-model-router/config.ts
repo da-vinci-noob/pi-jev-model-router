@@ -13,8 +13,8 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
  *   4. env: TYPESAFE_API_KEY / JEV_ROUTER_MODE / JEV_ROUTER_OFF
  */
 
-export type Tier = "quick" | "standard" | "high" | "premium";
-export const TIERS: readonly Tier[] = ["quick", "standard", "high", "premium"] as const;
+export type Tier = "quick" | "standard" | "high" | "premium" | "xpremium";
+export const TIERS: readonly Tier[] = ["quick", "standard", "high", "premium", "xpremium"] as const;
 
 export type Mode = "auto" | "confirm" | "notify";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -173,6 +173,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
       { provider: "openrouter", model: "openai/gpt-5.5", thinkingLevel: "high" },
       { provider: "openrouter", model: "~openai/gpt-astra-latest", thinkingLevel: "high" },
     ],
+    xpremium: [],
   },
   kindModels: {
     // Planning and design: strong long-horizon reasoners.
@@ -363,7 +364,7 @@ export function loadConfig(cwd?: string): JevRouterConfig {
 }
 
 function emptyChains(): Record<Tier, RouteChain> {
-  return { quick: [], standard: [], high: [], premium: [] };
+  return { quick: [], standard: [], high: [], premium: [], xpremium: [] };
 }
 
 export function hasApiKey(config: JevRouterConfig): boolean {
