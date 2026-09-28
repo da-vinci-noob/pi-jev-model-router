@@ -338,13 +338,30 @@ Without any `priority`, ordering is exactly as before.
 Known kinds: `plan`, `implement`, `debug`, `refactor`, `review`, `research`,
 `explain`, `operate`, `write`, `chat`.
 
-### 5. Change which task kinds exist
+### 5. Add or change task kinds
 
-The kinds are defined in `extensions/pi-jev-model-router/config.ts`
-(`TASK_KINDS`) and passed to Jev as the choice criteria. Edit the labels, add
-domains of your own (for example `data`, `infra`, `legal`), then add matching
-entries under `kindModels` and `kindMinimumTier`. Because the question is a Jev
-`choice`, the option set *is* the taxonomy — no retraining, no prompt parsing.
+Jev picks one kind per prompt from `taskKinds`: a label and a one-line
+description that Jev uses as the choice criteria. Add your own domains or reword
+a built-in description in config, then add matching `kindModels` and
+`kindMinimumTier` entries:
+
+```json
+{
+  "taskKinds": {
+    "data": "Querying, cleaning, or transforming datasets and SQL",
+    "infra": "Provisioning or changing cloud infrastructure and deploy config"
+  },
+  "kindModels": {
+    "data": [{ "provider": "openrouter", "model": "~google/gemini-pro-latest", "minTier": "standard" }]
+  },
+  "kindMinimumTier": { "infra": "high" }
+}
+```
+
+Entries merge over the built-in kinds (global, then project). A kind can't be
+removed, and entries without a non-empty string description are ignored.
+Because the question is a Jev `choice`, the option set *is* the taxonomy: no
+retraining, no prompt parsing.
 
 ### Config resolution order
 
@@ -518,6 +535,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `routes` | see above | Capability tier candidate chains; `xpremium` is empty (off) unless you set it |
 | `kindModels` | see above | Task-specialist chains with `minTier` (gate) and optional `priority` (rank) |
 | `kindMinimumTier` | see above | Per-kind floor tier |
+| `taskKinds` | the 10 kinds above | Kind labels and descriptions Jev chooses from; merged over the built-ins |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |

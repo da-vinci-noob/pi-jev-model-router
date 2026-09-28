@@ -1,5 +1,4 @@
 import type { JevRouterConfig } from "./config";
-import { TASK_KINDS } from "./config";
 import type { SpendSnapshot } from "./budget";
 
 /**
@@ -65,13 +64,13 @@ function buildState(input: ClassifyInput): Record<string, unknown> {
   };
 }
 
-function buildQuestions(): Record<string, unknown> {
+function buildQuestions(taskKinds: Record<string, string>): Record<string, unknown> {
   return {
     task_kind: {
       type: "choice",
       instructions:
         "Which single kind of work does `request` ask for? Judge the work the user wants done, not the topic they mention. Read `conversation_excerpt` when the request is a short follow-up that only makes sense in context. Pick the closest kind even when the request is ambiguous.",
-      criteria: TASK_KINDS,
+      criteria: taskKinds,
     },
     complexity: {
       type: "score",
@@ -111,7 +110,7 @@ function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function parseAnalysis(payload: unknown, latencyMs: number): RouteAnalysis {
+function parseAnalysis(payload: unknown, latencyMs: number, taskKinds: Record<string, string>): RouteAnalysis {
   const root = payload as { answers?: Record<string, any>; usage?: { input_tokens?: number; output_tokens?: number } };
   const answers = root.answers ?? {};
   const kind = answers.task_kind ?? {};
@@ -120,7 +119,7 @@ function parseAnalysis(payload: unknown, latencyMs: number): RouteAnalysis {
   const reasoning = answers.needs_deep_reasoning ?? {};
 
   const chosenKind = typeof kind.choice === "string" ? kind.choice : "chat";
-  if (!(chosenKind in TASK_KINDS)) {
+  if (!Object.hasOwn(taskKinds, chosenKind)) {
     throw new JevError(`Jev returned an unknown task kind: ${chosenKind}`);
   }
 
@@ -191,8 +190,8 @@ export async function classifyRequest(
   const payload = await postWithRetry(
     config,
     apiKey,
-    { state: buildState(input), model: config.jevModel, questions: buildQuestions() },
+    { state: buildState(input), model: config.jevModel, questions: buildQuestions(config.taskKinds) },
     signal,
   );
-  return parseAnalysis(payload, Date.now() - started);
+  return parseAnalysis(payload, Date.now() - started, config.taskKinds);
 }

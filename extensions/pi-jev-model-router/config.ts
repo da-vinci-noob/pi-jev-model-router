@@ -134,7 +134,21 @@ export interface JevRouterConfig {
   free: FreePoolConfig;
   budget: BudgetConfig;
   cache: CacheConfig;
+  taskKinds: Record<string, string>;
 }
+
+export const TASK_KINDS: Record<string, string> = {
+  plan: "Deciding what to build, sequencing work, or designing an approach before editing",
+  implement: "Writing or changing code, scripts, or configuration to produce a concrete result",
+  write: "Producing prose, documentation, comments, or other non-code content from scratch",
+  debug: "Diagnosing a failure, error, or unexpected behavior and finding its root cause",
+  refactor: "Restructuring existing code without changing intended behavior",
+  review: "Auditing code, a diff, a document, or a plan for problems and risks",
+  research: "Searching, reading, and synthesizing external information or unfamiliar APIs",
+  explain: "Answering a question or explaining how something works",
+  operate: "Running commands, tooling, git, deploys, or environment setup",
+  chat: "Small talk, acknowledgements, or a request with no real work attached",
+};
 
 export const DEFAULT_CONFIG: JevRouterConfig = {
   enabled: true,
@@ -259,6 +273,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     policy: "prefer",
     pool: [],
   },
+  taskKinds: { ...TASK_KINDS },
 };
 
 function readJson(path: string): unknown | undefined {
@@ -300,6 +315,10 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     const chain = normalizeChain(value);
     if (chain) kindModels[kind] = chain;
   }
+  const taskKinds = { ...base.taskKinds };
+  for (const [kind, value] of Object.entries(asRecord(p.taskKinds))) {
+    if (typeof value === "string" && value.trim()) taskKinds[kind] = value;
+  }
   const freePatch = asRecord(p.free);
   const freePool = normalizeChain(freePatch.pool);
   const free: FreePoolConfig = {
@@ -315,6 +334,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     ...(p as Partial<JevRouterConfig>),
     routes,
     kindModels,
+    taskKinds,
     free,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
@@ -376,16 +396,3 @@ export function hasApiKey(config: JevRouterConfig): boolean {
 export function apiKeyFor(config: JevRouterConfig): string {
   return config.apiKey?.trim() || process.env[config.apiKeyEnv]?.trim() || "";
 }
-
-export const TASK_KINDS: Record<string, string> = {
-  plan: "Deciding what to build, sequencing work, or designing an approach before editing",
-  implement: "Writing or changing code, scripts, or configuration to produce a concrete result",
-  write: "Producing prose, documentation, comments, or other non-code content from scratch",
-  debug: "Diagnosing a failure, error, or unexpected behavior and finding its root cause",
-  refactor: "Restructuring existing code without changing intended behavior",
-  review: "Auditing code, a diff, a document, or a plan for problems and risks",
-  research: "Searching, reading, and synthesizing external information or unfamiliar APIs",
-  explain: "Answering a question or explaining how something works",
-  operate: "Running commands, tooling, git, deploys, or environment setup",
-  chat: "Small talk, acknowledgements, or a request with no real work attached",
-};
