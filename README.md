@@ -298,9 +298,9 @@ the same chain.
 ```
 
 `minTier` gates a model to a minimum capability tier, so a specialist is only
-used when the judgment justifies it. Among eligible specialists, the one whose
-`minTier` is closest to the chosen tier wins — a cheap specialist never wins a
-premium-quality turn.
+used when the judgment justifies it. When priorities tie (the default), the
+eligible specialist whose `minTier` is closest to the chosen tier wins, so a
+cheap specialist does not win a premium-quality turn.
 
 To rank a specialist up without changing when it is eligible, give it a
 numeric `priority` (default `0`, higher first). `priority` is compared before

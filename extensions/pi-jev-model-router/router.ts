@@ -64,6 +64,25 @@ export function firstAvailable(
   return undefined;
 }
 
+/** Kind specialists eligible at a tier, in the order `decide()` tries them. */
+export function kindCandidates(config: JevRouterConfig, kind: string, index: number): RouteTarget[] {
+  return (config.kindModels[kind] ?? [])
+    .filter((target) => tierIndex(target.minTier) <= index)
+    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || tierIndex(b.minTier) - tierIndex(a.minTier));
+}
+
+/** The specialist that wins at each tier from the kind's floor up, merging runs, e.g. `high: a · premium: b`. */
+export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string): string {
+  const spans: { from: Tier; to: Tier; model: string }[] = [];
+  for (let i = tierIndex(config.kindMinimumTier[kind] ?? "quick"); i < TIERS.length; i += 1) {
+    const model = firstAvailable(models, kindCandidates(config, kind, i))?.model.id ?? "tier chain";
+    const last = spans[spans.length - 1];
+    if (last?.model === model) last.to = TIERS[i];
+    else spans.push({ from: TIERS[i], to: TIERS[i], model });
+  }
+  return spans.map((s) => `${s.from === s.to ? s.from : `${s.from}–${s.to}`}: ${s.model}`).join(" · ");
+}
+
 /** Best-effort reverse lookup: which tier does this model key sit on? */
 export function tierForModel(modelKey: string | undefined, config: JevRouterConfig): number | undefined {
   if (!modelKey) return undefined;
@@ -205,9 +224,7 @@ export function decide(
   const freePool = config.free.enabled
     ? config.free.pool.filter((t) => options.models.some((m) => m.provider === t.provider && m.id === t.model))
     : [];
-  const kindChain = (config.kindModels[analysis.kind] ?? [])
-    .filter((target) => tierIndex(target.minTier) <= index)
-    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || tierIndex(b.minTier) - tierIndex(a.minTier));
+  const kindChain = kindCandidates(config, analysis.kind, index);
   const ordered: RouteTarget[] = [];
   if (config.free.policy === "prefer") ordered.push(...freePool);
   ordered.push(...kindChain, ...config.routes[TIERS[index]]);
