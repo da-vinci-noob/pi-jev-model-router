@@ -697,6 +697,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
               const ok = firstAvailable(runtime.models, chain) !== undefined;
               return `  ${ok ? "✓" : "✗"} ${kind.padEnd(10)} ${describeKindRoutes(runtime.config, runtime.models, kind)}`;
             }),
+            runtime.config.free.enabled
+              ? `  free pool (${runtime.config.free.policy}, ${runtime.config.free.pool.length} configured) is tried ${runtime.config.free.policy === "prefer" ? "before these" : "after every tier"}`
+              : "  free pool: off",
             "",
             runtime.lastDecision ? `last: ${describeDecision(runtime.lastDecision)}` : "last: none",
             "",
