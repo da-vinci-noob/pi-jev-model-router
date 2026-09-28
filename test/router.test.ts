@@ -207,6 +207,15 @@ describe("decide: availability fallback", () => {
     expect(run({}, {}, { models: [q1, h1] }).model?.id).toBe("model-q1");
   });
 
+  test("falling back to a lower tier reports that tier as a downgrade", () => {
+    const d = run(highDemand, {}, { models: [q1, s1, p1] });
+    expect(d.desiredTier).toBe("high");
+    expect(d.tier).toBe("standard");
+    expect(d.tierIndex).toBe(1);
+    expect(d.downgraded).toBe(true);
+    expect(d.notes).toContain("high chain unavailable → standard");
+  });
+
   test("returns undefined when no configured model is available", () => {
     expect(decide(analysis(), config(), options({ models: [] }))).toBeUndefined();
     expect(decide(analysis(), config(), options({ models: [model("unlisted")] }))).toBeUndefined();
@@ -340,6 +349,14 @@ describe("tierForModel", () => {
     expect(tierForModel(`${P}/model-q1`, c)).toBe(0);
     expect(tierForModel("otherprov/model-h1", c)).toBeUndefined();
     expect(tierForModel(undefined, c)).toBeUndefined();
+  });
+
+  test("a kind specialist without minTier is gated at standard", () => {
+    const c = config({ kindModels: { chat: [{ provider: P, model: "spec-nogate" }] } });
+    const models = [...ALL, model("spec-nogate")];
+    expect(tierForModel(`${P}/spec-nogate`, c)).toBe(1);
+    expect(decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options({ models }))?.model?.id).toBe("model-q1");
+    expect(decide(analysis({ complexity: 1, budgetIntensity: 1 }), c, options({ models }))?.model?.id).toBe("spec-nogate");
   });
 });
 

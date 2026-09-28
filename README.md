@@ -553,8 +553,8 @@ bun run typecheck   # tsc against the real pi ExtensionAPI types
 bun test            # router, config, Jev client, budget, and extension load/route tests
 ```
 
-Tests never hit the network (`fetch` is stubbed) and never read your real
-`~/.pi` config (`os.homedir` is pointed at a temp dir).
+Tests stub `fetch`, so they never hit the network. Tests that load config mock
+`os.homedir` to a temp dir, so your real `~/.pi` config doesn't affect them.
 
 Layout:
 
