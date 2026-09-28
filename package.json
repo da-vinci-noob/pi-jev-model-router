@@ -1,6 +1,6 @@
 {
   "name": "pi-jev-model-router",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Route pi prompts to task-appropriate model tiers with TypeSafe Jev typed judgments. Budget-aware, with automatic fallback.",
   "author": {
     "name": "Shah Rukh",
