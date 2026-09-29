@@ -11,7 +11,7 @@
  * Tool:      jev_route
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
 import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
@@ -680,13 +680,20 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           const write = rest.includes("--write");
           const file = configPaths().generated;
           if (write) {
+            if (Object.keys(routes).length === 0 && Object.keys(kindModels).length === 0) {
+              notify(ctx, "jev-router suggest: nothing to write, none of the scored models are in pi's catalogue", "warning");
+              return;
+            }
+            const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
             try {
               mkdirSync(dirname(file), { recursive: true });
-              writeFileSync(`${file}.tmp`, `${json}\n`);
-              renameSync(`${file}.tmp`, file);
+              writeFileSync(tmp, `${json}\n`);
+              renameSync(tmp, file);
             } catch (error) {
               notify(ctx, `jev-router suggest: can't write ${file}: ${error instanceof Error ? error.message : String(error)}`, "warning");
               return;
+            } finally {
+              rmSync(tmp, { force: true });
             }
             runtime.config = loadConfig(ctx.cwd);
             statusLine(ctx, runtime);

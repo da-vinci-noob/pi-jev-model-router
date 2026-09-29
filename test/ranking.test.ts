@@ -83,6 +83,23 @@ describe("suggestRoutes: ordering", () => {
     const scores: Scores = { models: { "a/unpriced": { score: 0.9 }, "b/priced": { score: 0.9 } } };
     expect(keys(suggestRoutes(config(), models, scores).routes.premium)).toEqual(["b/priced", "a/unpriced"]);
   });
+
+  test("free models are ordered by score, then key, regardless of file order", () => {
+    const free = { input: 0, output: 0 };
+    const models = [m("b", "low"), m("a", "high"), m("c", "tie")];
+    const scores: Scores = {
+      models: {
+        "b/low": { score: 0.86, cost: free },
+        "c/tie": { score: 0.9, cost: free },
+        "a/high": { score: 0.9, cost: free },
+      },
+    };
+    expect(keys(suggestRoutes(config({ spreadProviders: false }), models, scores).routes.premium)).toEqual([
+      "a/high",
+      "c/tie",
+      "b/low",
+    ]);
+  });
 });
 
 describe("provider spread", () => {
@@ -107,6 +124,35 @@ describe("provider spread", () => {
       "a/2",
       "b/1",
     ]);
+  });
+
+  test("routing follows the spread order when the first specialist is unavailable", () => {
+    const models = [m("a", "1", cost(1, 1)), m("a", "2", cost(2, 2)), m("b", "1", cost(3, 3))];
+    const scores: Scores = {
+      models: {
+        "a/1": { score: 0.9, kinds: { implement: 0.9 } },
+        "a/2": { score: 0.9, kinds: { implement: 0.9 } },
+        "b/1": { score: 0.9, kinds: { implement: 0.9 } },
+      },
+    };
+    const { kindModels } = suggestRoutes(config(), models, scores);
+    expect(keys(kindModels.implement)).toEqual(["a/1", "b/1", "a/2"]);
+    const routed = decide(
+      {
+        kind: "implement",
+        kindConfidence: 0.9,
+        kindProbabilities: {},
+        complexity: 3,
+        complexityConfidence: 0.9,
+        budgetIntensity: 3,
+        budgetIntensityConfidence: 0.9,
+        deepReasoning: 0.5,
+        latencyMs: 1,
+      },
+      { ...config(), kindModels },
+      { models: models.slice(1), spend: { today: 0, month: 0, pressure: 0 } },
+    );
+    expect(`${routed?.model?.provider}/${routed?.model?.id}`).toBe("b/1");
   });
 });
 

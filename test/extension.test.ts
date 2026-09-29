@@ -214,6 +214,18 @@ describe("pi extension", () => {
       expect(status).toContain("implement  standard–high: tier chain · premium: high-a");
     });
 
+    test("--write refuses an empty proposal and keeps the existing generated file", async () => {
+      mkdirSync(agentDir, { recursive: true });
+      const previous = JSON.stringify({ routes: { high: [{ provider: "testprov", model: "high-a" }] } });
+      writeFileSync(generatedFile, previous);
+      writeScores({ "otherprov/not-in-catalogue": { score: 0.9 } });
+      const { command, notes } = await load();
+
+      await command("jev-router", "suggest --write");
+      expect(notes.at(-1)).toEqual([expect.stringContaining("nothing to write"), "warning"]);
+      expect(readFileSync(generatedFile, "utf8")).toBe(previous);
+    });
+
     test("a missing scores file warns with its path", async () => {
       const { command, notes } = await load();
 

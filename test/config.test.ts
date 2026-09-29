@@ -185,6 +185,16 @@ describe("loadConfig", () => {
     expect(config.routes.quick).toEqual(DEFAULT_CONFIG.routes.quick);
   });
 
+  test("an explicit empty list in hand-edited config clears a generated chain", () => {
+    writeGenerated({ routes: { high: [modelA] }, kindModels: { plan: [modelA], review: [modelA] } });
+    writeGlobal({ routes: { high: [] } });
+    writeProject({ kindModels: { plan: [] } });
+    const config = loadConfig(cwd);
+    expect(config.routes.high).toEqual([]);
+    expect(config.kindModels.plan).toEqual([]);
+    expect(config.kindModels.review).toEqual([modelA]);
+  });
+
   test("the generated file only contributes routes and kindModels", () => {
     writeGenerated({ mode: "notify", enabled: false, useDefaultModels: false, routes: { xpremium: [modelA] } });
     const config = loadConfig(cwd);

@@ -323,12 +323,13 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
   const routes = { ...base.routes };
   const rawRoutes = asRecord(p.routes);
   for (const tier of TIERS) {
-    const chain = normalizeChain(rawRoutes[tier]);
+    const raw = rawRoutes[tier];
+    const chain = Array.isArray(raw) && raw.length === 0 ? [] : normalizeChain(raw);
     if (chain) routes[tier] = chain;
   }
   const kindModels = { ...base.kindModels };
   for (const [kind, value] of Object.entries(asRecord(p.kindModels))) {
-    const chain = normalizeChain(value);
+    const chain = Array.isArray(value) && value.length === 0 ? [] : normalizeChain(value);
     if (chain) kindModels[kind] = chain;
   }
   const taskKinds = { ...base.taskKinds };

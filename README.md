@@ -496,11 +496,20 @@ fetches rankings itself; any script or board export that writes this JSON works.
 
 `/jev-router suggest` prints the proposal. `/jev-router suggest --write` saves it
 to `~/.pi/agent/pi-jev-model-router.generated.json` and applies it right away.
-That file is loaded **before** your own config, so any tier or kind you set by
-hand still wins, and your config file is never written. An empty list (`[]`)
-does not clear a tier, the same as with the built-in defaults, so to drop
-generated entries, edit or delete the generated file. Generated specialists carry
-a descending `priority` so routing tries them in the proposed order.
+It refuses to write an empty proposal, so a bad scores file never wipes a good
+generated file.
+
+That file is loaded **before** your own config, and your config file is never
+written. So anything you set by hand wins over the generated file:
+
+- a tier or kind you define replaces the generated one
+- an explicit empty list clears it, e.g. `"routes": { "high": [] }` or
+  `"kindModels": { "plan": [] }` (a list with only invalid entries is ignored)
+
+Generated specialists carry a descending `priority`, so routing tries them in the
+proposed order. The built-in chains still fill any tier or kind the generated
+file doesn't cover. To route only from your scores and hand edits, set
+`"useDefaultModels": false`.
 
 ## Extra-premium tier
 
