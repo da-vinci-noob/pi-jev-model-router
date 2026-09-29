@@ -473,7 +473,9 @@ fetches rankings itself; any script or board export that writes this JSON works.
 - Keys are `<provider>/<model id>` and must match a model in pi's catalogue
   exactly. Scored models pi doesn't have are listed as not in the catalogue.
 - `score` places the model on a tier by fixed cut-offs (inclusive), below
-  `standard` is `quick`. `xpremium` is never filled; set it by hand.
+  `standard` is `quick`. `xpremium` is never filled; set it by hand. Scores and
+  cut-offs just need the same scale (0-1 by default, or e.g. 0-100 with matching
+  cut-offs), and cut-offs that are not ascending are ignored.
 - Within a tier, models are ordered by score per cost, using pi's catalogue
   price (`input + output` USD per 1M tokens) unless the entry has a `cost`
   override in the same units. Use the override for flat subscriptions or quota

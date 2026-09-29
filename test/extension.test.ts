@@ -69,8 +69,8 @@ async function load(options: { minimal?: boolean } = {}) {
   if (!options.minimal) {
     Object.assign(fake, {
       registerCommand: (name: string, command: Command) => commands.set(name, command),
-      registerTool: () => { },
-      appendEntry: () => { },
+      registerTool: () => {},
+      appendEntry: () => {},
       setModel: async (model: unknown) => (setModel.push(model), true),
       setThinkingLevel: (level: unknown) => thinking.push(level),
     });
@@ -85,7 +85,7 @@ async function load(options: { minimal?: boolean } = {}) {
       getAvailable: () => models,
       find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
     },
-    ui: { notify: (text: string, level: string) => notes.push([text, level]), setStatus: () => { } },
+    ui: { notify: (text: string, level: string) => notes.push([text, level]), setStatus: () => {} },
     sessionManager: { buildContextEntries: () => [] },
     getContextUsage: () => ({ tokens: 0 }),
   };

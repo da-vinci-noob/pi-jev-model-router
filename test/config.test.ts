@@ -225,6 +225,15 @@ describe("loadConfig", () => {
     });
   });
 
+  test("cut-offs that are not in ascending order are ignored as a set", () => {
+    writeProject({ ranking: { cutoffs: { standard: 0.9, high: 0.7, premium: 0.5 } } });
+    expect(loadConfig(cwd).ranking.cutoffs).toEqual(DEFAULT_CONFIG.ranking.cutoffs);
+    writeProject({ ranking: { cutoffs: { premium: 0.6 } } });
+    expect(loadConfig(cwd).ranking.cutoffs).toEqual(DEFAULT_CONFIG.ranking.cutoffs);
+    writeProject({ ranking: { cutoffs: { standard: 40, high: 60, premium: 80 } } });
+    expect(loadConfig(cwd).ranking.cutoffs).toEqual({ standard: 40, high: 60, premium: 80 });
+  });
+
   test("a scoresFile starting with ~ resolves to the home directory", () => {
     writeProject({ ranking: { scoresFile: "~/scores/models.json" } });
     expect(loadConfig(cwd).ranking.scoresFile).toBe(join(fakeHome, "scores", "models.json"));

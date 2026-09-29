@@ -347,10 +347,11 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     pool: freePool ?? base.free.pool,
   };
   const rankingPatch = asRecord(p.ranking);
-  const cutoffs = { ...base.ranking.cutoffs };
+  let cutoffs = { ...base.ranking.cutoffs };
   for (const [key, value] of Object.entries(asRecord(rankingPatch.cutoffs))) {
     if (key in cutoffs && typeof value === "number" && Number.isFinite(value)) cutoffs[key as keyof typeof cutoffs] = value;
   }
+  if (!(cutoffs.standard <= cutoffs.high && cutoffs.high <= cutoffs.premium)) cutoffs = base.ranking.cutoffs;
   const scoresFile = rankingPatch.scoresFile;
   const ranking: RankingConfig = {
     scoresFile:
