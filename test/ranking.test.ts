@@ -110,6 +110,16 @@ describe("provider spread", () => {
     expect(keys(spreadByProvider(chain))).toEqual(["a/1", "b/1", "a/2", "c/1", "a/3"]);
   });
 
+  test("looks ahead so a feasible no-repeat order is found, keeping value order where it can", () => {
+    const chain = [t("a", "1"), t("a", "2"), t("b", "1"), t("c", "1"), t("c", "2"), t("c", "3")];
+    expect(keys(spreadByProvider(chain))).toEqual(["a/1", "c/1", "a/2", "c/2", "b/1", "c/3"]);
+  });
+
+  test("when repeats can't be avoided, they are pushed to the end", () => {
+    const chain = [t("a", "1"), t("a", "2"), t("a", "3"), t("b", "1")];
+    expect(keys(spreadByProvider(chain))).toEqual(["a/1", "b/1", "a/2", "a/3"]);
+  });
+
   test("a chain from a single provider is returned unchanged", () => {
     const chain = [t("a", "1"), t("a", "2")];
     expect(spreadByProvider(chain)).toEqual(chain);

@@ -40,9 +40,17 @@ export function loadScores(file: string): { ok: true; scores: Scores } | { ok: f
 export function spreadByProvider(chain: RouteChain): RouteChain {
   const rest = [...chain];
   const out: RouteChain = [];
+  const arrangeable = (left: RouteChain, prev: string) => {
+    const counts = new Map<string, number>();
+    for (const t of left) counts.set(t.provider, (counts.get(t.provider) ?? 0) + 1);
+    return [...counts].every(([q, n]) => n <= (q === prev ? Math.floor(left.length / 2) : Math.ceil(left.length / 2)));
+  };
   while (rest.length > 0) {
     const prev = out.at(-1)?.provider;
-    const index = Math.max(0, rest.findIndex((t) => t.provider !== prev));
+    let index = rest.findIndex(
+      (t, i) => t.provider !== prev && arrangeable([...rest.slice(0, i), ...rest.slice(i + 1)], t.provider),
+    );
+    if (index < 0) index = Math.max(0, rest.findIndex((t) => t.provider !== prev));
     out.push(...rest.splice(index, 1));
   }
   return out;
