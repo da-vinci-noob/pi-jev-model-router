@@ -12,6 +12,7 @@ const { DEFAULT_CONFIG, TASK_KINDS, apiKeyFor, hasApiKey, loadConfig } = await i
 
 const ENV_KEYS = ["TYPESAFE_API_KEY", "JEV_ROUTER_MODE", "JEV_ROUTER_OFF"] as const;
 const globalFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.json");
+const generatedFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.generated.json");
 let savedEnv: Record<string, string | undefined>;
 let cwd: string;
 
@@ -23,6 +24,11 @@ function writeProject(patch: unknown): void {
 function writeGlobal(patch: unknown): void {
   mkdirSync(join(fakeHome, ".pi", "agent"), { recursive: true });
   writeFileSync(globalFile, JSON.stringify(patch));
+}
+
+function writeGenerated(patch: unknown): void {
+  mkdirSync(join(fakeHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(generatedFile, JSON.stringify(patch));
 }
 
 beforeEach(() => {
@@ -38,6 +44,7 @@ afterEach(() => {
   }
   rmSync(cwd, { recursive: true, force: true });
   rmSync(globalFile, { force: true });
+  rmSync(generatedFile, { force: true });
 });
 
 afterAll(() => rmSync(fakeHome, { recursive: true, force: true }));
@@ -165,6 +172,52 @@ describe("loadConfig", () => {
   test("taskKinds ignore entries without a non-empty string description", () => {
     writeProject({ taskKinds: { data: "", legal: 3, ops: null, plan: "   ", infra: "Provisioning infra" } });
     expect(loadConfig(cwd).taskKinds).toEqual({ ...TASK_KINDS, infra: "Provisioning infra" });
+  });
+
+  test("the generated file fills routes and kindModels under hand-edited config", () => {
+    writeGenerated({ routes: { high: [modelA], premium: [modelA] }, kindModels: { plan: [modelA] } });
+    writeGlobal({ routes: { premium: [modelB] } });
+    writeProject({ kindModels: { plan: [modelB] } });
+    const config = loadConfig(cwd);
+    expect(config.routes.high).toEqual([modelA]);
+    expect(config.routes.premium).toEqual([modelB]);
+    expect(config.kindModels.plan).toEqual([modelB]);
+    expect(config.routes.quick).toEqual(DEFAULT_CONFIG.routes.quick);
+  });
+
+  test("the generated file only contributes routes and kindModels", () => {
+    writeGenerated({ mode: "notify", enabled: false, useDefaultModels: false, routes: { xpremium: [modelA] } });
+    const config = loadConfig(cwd);
+    expect(config.mode).toBe(DEFAULT_CONFIG.mode);
+    expect(config.enabled).toBe(true);
+    expect(config.routes.standard).toEqual(DEFAULT_CONFIG.routes.standard);
+    expect(config.routes.xpremium).toEqual([]);
+  });
+
+  test("the generated file also applies when useDefaultModels is off", () => {
+    writeGenerated({ routes: { standard: [modelA] } });
+    writeGlobal({ useDefaultModels: false });
+    const config = loadConfig(cwd);
+    expect(config.routes.standard).toEqual([modelA]);
+    expect(config.routes.high).toEqual([]);
+  });
+
+  test("ranking defaults, with partial cut-off overrides", () => {
+    expect(loadConfig(cwd).ranking).toEqual(DEFAULT_CONFIG.ranking);
+    expect(DEFAULT_CONFIG.ranking.cutoffs).toEqual({ standard: 0.5, high: 0.7, premium: 0.85 });
+    expect(DEFAULT_CONFIG.ranking.spreadProviders).toBe(true);
+    expect(DEFAULT_CONFIG.ranking.scoresFile).toBe(join(fakeHome, ".pi", "agent", "pi-jev-model-router.scores.json"));
+    writeProject({ ranking: { cutoffs: { premium: 0.9, high: "x" }, spreadProviders: false, scoresFile: "/tmp/s.json" } });
+    expect(loadConfig(cwd).ranking).toEqual({
+      scoresFile: "/tmp/s.json",
+      cutoffs: { standard: 0.5, high: 0.7, premium: 0.9 },
+      spreadProviders: false,
+    });
+  });
+
+  test("a scoresFile starting with ~ resolves to the home directory", () => {
+    writeProject({ ranking: { scoresFile: "~/scores/models.json" } });
+    expect(loadConfig(cwd).ranking.scoresFile).toBe(join(fakeHome, "scores", "models.json"));
   });
 
   test("free pool merges valid fields", () => {

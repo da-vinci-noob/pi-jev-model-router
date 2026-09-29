@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as realOs from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,10 @@ mock.module("node:os", () => ({ ...realOs, homedir: () => home }));
 const { default: extension } = await import("../extensions/pi-jev-model-router/index");
 
 type Handler = (event: unknown, ctx?: unknown) => Promise<unknown>;
+type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
+const agentDir = join(home, ".pi", "agent");
+const scoresFile = join(agentDir, "pi-jev-model-router.scores.json");
+const generatedFile = join(agentDir, "pi-jev-model-router.generated.json");
 
 const cost = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 };
 const models = ["quick-a", "std-a", "high-a", "prem-a"].map((id) => ({ provider: "testprov", id, cost }));
@@ -58,14 +62,15 @@ function stubFetch(respond: () => Response): void {
 
 async function load(options: { minimal?: boolean } = {}) {
   const handlers = new Map<string, Handler>();
+  const commands = new Map<string, Command>();
   const setModel: unknown[] = [];
   const thinking: unknown[] = [];
   const fake: Record<string, unknown> = { on: (event: string, handler: Handler) => handlers.set(event, handler) };
   if (!options.minimal) {
     Object.assign(fake, {
-      registerCommand: () => {},
-      registerTool: () => {},
-      appendEntry: () => {},
+      registerCommand: (name: string, command: Command) => commands.set(name, command),
+      registerTool: () => { },
+      appendEntry: () => { },
       setModel: async (model: unknown) => (setModel.push(model), true),
       setThinkingLevel: (level: unknown) => thinking.push(level),
     });
@@ -80,13 +85,14 @@ async function load(options: { minimal?: boolean } = {}) {
       getAvailable: () => models,
       find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
     },
-    ui: { notify: (text: string, level: string) => notes.push([text, level]), setStatus: () => {} },
+    ui: { notify: (text: string, level: string) => notes.push([text, level]), setStatus: () => { } },
     sessionManager: { buildContextEntries: () => [] },
     getContextUsage: () => ({ tokens: 0 }),
   };
   await handlers.get("session_start")!({}, ctx);
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
-  return { input, notes, setModel, thinking };
+  const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
+  return { input, command, notes, setModel, thinking };
 }
 
 beforeEach(() => {
@@ -166,5 +172,53 @@ describe("pi extension", () => {
     const { notes } = await load();
 
     expect(notes.filter(([text]) => text.includes("no models are configured"))).toEqual([]);
+  });
+
+  describe("/jev-router suggest", () => {
+    const writeScores = (models: Record<string, unknown>) => {
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(scoresFile, JSON.stringify({ models }));
+    };
+    afterEach(() => {
+      rmSync(scoresFile, { force: true });
+      rmSync(generatedFile, { force: true });
+    });
+
+    test("prints a proposal from the scores file and pi's catalogue without writing anything", async () => {
+      writeScores({ "testprov/prem-a": { score: 0.9 }, "testprov/std-a": { score: 0.6 }, "otherprov/x": { score: 0.9 } });
+      const { command, notes } = await load();
+
+      await command("jev-router", "suggest");
+      const [text] = notes.at(-1)!;
+      expect(text).toContain('"premium"');
+      expect(text).toContain('"prem-a"');
+      expect(text).toContain("otherprov/x");
+      expect(existsSync(generatedFile)).toBe(false);
+    });
+
+    test("--write saves the generated file and applies it under hand-edited config", async () => {
+      writeScores({
+        "testprov/quick-a": { score: 0.6 },
+        "testprov/high-a": { score: 0.75, kinds: { implement: 0.9 } },
+      });
+      const { command, notes } = await load();
+
+      await command("jev-router", "suggest --write");
+      const generated = JSON.parse(readFileSync(generatedFile, "utf8"));
+      expect(generated.routes.standard).toEqual([{ provider: "testprov", model: "quick-a" }]);
+      expect(generated.kindModels.implement).toEqual([{ provider: "testprov", model: "high-a", minTier: "premium", priority: 1 }]);
+
+      await command("jev-router", "status");
+      const [status] = notes.at(-1)!;
+      expect(status).toContain("standard  testprov/std-a");
+      expect(status).toContain("implement  standard–high: tier chain · premium: high-a");
+    });
+
+    test("a missing scores file warns with its path", async () => {
+      const { command, notes } = await load();
+
+      await command("jev-router", "suggest");
+      expect(notes.at(-1)).toEqual([expect.stringContaining(scoresFile), "warning"]);
+    });
   });
 });

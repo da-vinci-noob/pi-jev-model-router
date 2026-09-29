@@ -127,6 +127,8 @@ disabled. No configuration is required — sensible defaults are built in.
 | `/jev-router budget monthly 150` | Session-only monthly cap |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
+| `/jev-router suggest` | Rank your scored models into proposed `routes` / `kindModels` and print them (see [Ranking models from your own scores](#ranking-models-from-your-own-scores)) |
+| `/jev-router suggest --write` | Same, and save it as a generated config layer that your own config overrides |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
 
 The model can also call the `jev_route` tool to ask for a tier recommendation for
@@ -368,9 +370,10 @@ retraining, no prompt parsing.
 Later sources win:
 
 1. built-in defaults
-2. `~/.pi/agent/pi-jev-model-router.json`
-3. `<cwd>/.pi/pi-jev-model-router.json` (trusted projects only)
-4. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`), `JEV_ROUTER_OFF=1`
+2. `~/.pi/agent/pi-jev-model-router.generated.json`: only `routes` and `kindModels`, written by `/jev-router suggest --write`
+3. `~/.pi/agent/pi-jev-model-router.json`
+4. `<cwd>/.pi/pi-jev-model-router.json` (trusted projects only)
+5. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`), `JEV_ROUTER_OFF=1`
 
 A full example lives at
 [`extensions/pi-jev-model-router/pi-jev-model-router.example.json`](extensions/pi-jev-model-router/pi-jev-model-router.example.json).
@@ -448,6 +451,56 @@ entirely when a model's pricing is unknown, so it never blocks on guesses. Set
   }
 }
 ```
+
+## Ranking models from your own scores
+
+Instead of maintaining `routes` by hand, you can give the router a scores file
+and let it propose chains from the models pi actually has. The router never
+fetches rankings itself; any script or board export that writes this JSON works.
+
+`~/.pi/agent/pi-jev-model-router.scores.json`:
+
+```json
+{
+  "models": {
+    "openrouter/~anthropic/claude-opus-latest": { "score": 0.92, "kinds": { "review": 0.95, "plan": 0.9 } },
+    "openrouter/~google/gemini-flash-latest": { "score": 0.55, "kinds": { "write": 0.7 } },
+    "grok-cli/grok-4.6": { "score": 0.8, "cost": { "input": 0, "output": 0 } }
+  }
+}
+```
+
+- Keys are `<provider>/<model id>` and must match a model in pi's catalogue
+  exactly. Scored models pi doesn't have are listed as not in the catalogue.
+- `score` places the model on a tier by fixed cut-offs (inclusive), below
+  `standard` is `quick`. `xpremium` is never filled; set it by hand.
+- Within a tier, models are ordered by score per cost, using pi's catalogue
+  price (`input + output` USD per 1M tokens) unless the entry has a `cost`
+  override in the same units. Use the override for flat subscriptions or quota
+  limits: set your own effective price, or `0` to treat the model as free (free
+  models rank first). Models without any known price go last.
+- `kinds` scores build `kindModels` for kinds in `taskKinds`, each gated
+  (`minTier`) at the tier its kind score clears.
+- With `spreadProviders` on (the default), a chain never has two entries in a
+  row from the same provider when it can be avoided.
+
+```json
+{
+  "ranking": {
+    "cutoffs": { "standard": 0.5, "high": 0.7, "premium": 0.85 },
+    "spreadProviders": true,
+    "scoresFile": "~/.pi/agent/pi-jev-model-router.scores.json"
+  }
+}
+```
+
+`/jev-router suggest` prints the proposal. `/jev-router suggest --write` saves it
+to `~/.pi/agent/pi-jev-model-router.generated.json` and applies it right away.
+That file is loaded **before** your own config, so any tier or kind you set by
+hand still wins, and your config file is never written. An empty list (`[]`)
+does not clear a tier, the same as with the built-in defaults, so to drop
+generated entries, edit or delete the generated file. Generated specialists carry
+a descending `priority` so routing tries them in the proposed order.
 
 ## Extra-premium tier
 
@@ -536,6 +589,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `kindModels` | see above | Task-specialist chains with `minTier` (gate) and optional `priority` (rank) |
 | `kindMinimumTier` | see above | Per-kind floor tier |
 | `taskKinds` | the 10 kinds above | Kind labels and descriptions Jev chooses from; merged over the built-ins |
+| `ranking` | cut-offs `0.5 / 0.7 / 0.85`, `spreadProviders: true` | Scores file and cut-offs for `/jev-router suggest` |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
@@ -627,6 +681,7 @@ Layout:
 | `extensions/pi-jev-model-router/jev.ts` | TypeSafe HTTP client, question definitions, response parsing |
 | `extensions/pi-jev-model-router/router.ts` | composition (`decide`), tier/kind chains, availability fallback |
 | `extensions/pi-jev-model-router/budget.ts` | spend ledger, caps, pressure |
+| `extensions/pi-jev-model-router/ranking.ts` | scores file, tier cut-offs, provider spread for `/jev-router suggest` |
 
 No runtime dependencies: the extension talks to TypeSafe with plain `fetch`. It
 imports `typebox` (tool schema) and `@earendil-works/pi-coding-agent` (config

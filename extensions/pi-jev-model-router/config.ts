@@ -95,6 +95,13 @@ export interface FreePoolConfig {
   pool: RouteChain;
 }
 
+export interface RankingConfig {
+  scoresFile: string;
+  /** Inclusive score floors per tier; below `standard` is quick. */
+  cutoffs: { standard: number; high: number; premium: number };
+  spreadProviders: boolean;
+}
+
 export interface JevRouterConfig {
   enabled: boolean;
   mode: Mode;
@@ -135,6 +142,7 @@ export interface JevRouterConfig {
   budget: BudgetConfig;
   cache: CacheConfig;
   taskKinds: Record<string, string>;
+  ranking: RankingConfig;
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -274,6 +282,14 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     pool: [],
   },
   taskKinds: { ...TASK_KINDS },
+  ranking: {
+    // Getter: homedir() is resolved on read, not at import.
+    get scoresFile() {
+      return join(homedir(), CONFIG_DIR_NAME, "agent", "pi-jev-model-router.scores.json");
+    },
+    cutoffs: { standard: 0.5, high: 0.7, premium: 0.85 },
+    spreadProviders: true,
+  },
 };
 
 function readJson(path: string): unknown | undefined {
@@ -329,6 +345,23 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
         : base.free.policy,
     pool: freePool ?? base.free.pool,
   };
+  const rankingPatch = asRecord(p.ranking);
+  const cutoffs = { ...base.ranking.cutoffs };
+  for (const [key, value] of Object.entries(asRecord(rankingPatch.cutoffs))) {
+    if (key in cutoffs && typeof value === "number" && Number.isFinite(value)) cutoffs[key as keyof typeof cutoffs] = value;
+  }
+  const scoresFile = rankingPatch.scoresFile;
+  const ranking: RankingConfig = {
+    scoresFile:
+      typeof scoresFile !== "string"
+        ? base.ranking.scoresFile
+        : scoresFile === "~" || scoresFile.startsWith("~/")
+          ? join(homedir(), scoresFile.slice(1))
+          : scoresFile,
+    cutoffs,
+    spreadProviders:
+      typeof rankingPatch.spreadProviders === "boolean" ? rankingPatch.spreadProviders : base.ranking.spreadProviders,
+  };
   return {
     ...base,
     ...(p as Partial<JevRouterConfig>),
@@ -336,6 +369,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     kindModels,
     taskKinds,
     free,
+    ranking,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {
@@ -345,10 +379,11 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
   };
 }
 
-export function configPaths(cwd?: string): { global: string; project?: string } {
-  const global = join(homedir(), CONFIG_DIR_NAME, "agent", "pi-jev-model-router.json");
+export function configPaths(cwd?: string): { global: string; generated: string; project?: string } {
+  const agentDir = join(homedir(), CONFIG_DIR_NAME, "agent");
   return {
-    global,
+    global: join(agentDir, "pi-jev-model-router.json"),
+    generated: join(agentDir, "pi-jev-model-router.generated.json"),
     project: cwd ? join(cwd, CONFIG_DIR_NAME, "pi-jev-model-router.json") : undefined,
   };
 }
@@ -370,6 +405,9 @@ export function loadConfig(cwd?: string): JevRouterConfig {
     ? { ...DEFAULT_CONFIG }
     : { ...DEFAULT_CONFIG, routes: emptyChains(), kindModels: {} };
 
+  const generated = asRecord(readJson(paths.generated));
+  const { xpremium: _, ...generatedRoutes } = asRecord(generated.routes);
+  config = merge(config, { routes: generatedRoutes, kindModels: generated.kindModels });
   if (globalPatch) config = merge(config, globalPatch);
   if (projectPatch) config = merge(config, projectPatch);
 

@@ -6,13 +6,16 @@
  * deserves, then route the turn to the matching model tier. Code applies the
  * budget policy; Jev only judges the task.
  *
- * Commands:  /jev-router [status|on|off|mode|budget|why|revert]
+ * Commands:  /jev-router [status|on|off|mode|budget|why|revert|suggest [--write]]
  *            /jev-route <text>
  * Tool:      jev_route
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { loadScores, suggestRoutes } from "./ranking";
 import {
   formatUsd,
   loadLedger,
@@ -581,7 +584,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
   });
 
   if (hasCommands) pi.registerCommand("jev-router", {
-    description: "TypeSafe Jev model router: status, on/off, mode, budget",
+    description: "TypeSafe Jev model router: status, on/off, mode, budget, suggest [--write]",
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       switch ((sub ?? "status").toLowerCase()) {
@@ -665,6 +668,45 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           );
           return;
         }
+        case "suggest": {
+          const loaded = loadScores(runtime.config.ranking.scoresFile);
+          if (!loaded.ok) {
+            notify(ctx, `jev-router suggest: ${loaded.error}`, "warning");
+            return;
+          }
+          runtime.models = toAvailable(ctx);
+          const { routes, kindModels, unmatched } = suggestRoutes(runtime.config, runtime.models, loaded.scores);
+          const json = JSON.stringify({ routes, kindModels }, null, 2);
+          const write = rest.includes("--write");
+          const file = configPaths().generated;
+          if (write) {
+            try {
+              mkdirSync(dirname(file), { recursive: true });
+              writeFileSync(`${file}.tmp`, `${json}\n`);
+              renameSync(`${file}.tmp`, file);
+            } catch (error) {
+              notify(ctx, `jev-router suggest: can't write ${file}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+              return;
+            }
+            runtime.config = loadConfig(ctx.cwd);
+            statusLine(ctx, runtime);
+          }
+          notify(
+            ctx,
+            [
+              `suggested ${Object.keys(routes).length} tier(s) and ${Object.keys(kindModels).length} kind specialist(s) from ${Object.keys(loaded.scores.models).length - unmatched.length} scored model(s)`,
+              unmatched.length > 0 ? `not in pi's catalogue: ${unmatched.join(", ")}` : "",
+              write
+                ? `wrote ${file} and applied it (hand-edited config still wins per tier/kind)`
+                : "preview only: run /jev-router suggest --write to save and apply it",
+              json,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            "info",
+          );
+          return;
+        }
         case "status":
         default: {
           const spend = spendSnapshot(runtime.ledger, runtime.config.budget);
@@ -703,7 +745,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             "",
             runtime.lastDecision ? `last: ${describeDecision(runtime.lastDecision)}` : "last: none",
             "",
-            "commands: /jev-router on|off|mode|budget|why|revert · /jev-route <text>",
+            "commands: /jev-router on|off|mode|budget|why|revert|suggest [--write] · /jev-route <text>",
           ];
           notify(ctx, lines.join("\n"), "info");
           return;
