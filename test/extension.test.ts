@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as realOs from "node:os";
 import { join } from "node:path";
 
@@ -181,7 +181,7 @@ describe("pi extension", () => {
     };
     afterEach(() => {
       rmSync(scoresFile, { force: true });
-      rmSync(generatedFile, { force: true });
+      rmSync(generatedFile, { recursive: true, force: true });
     });
 
     test("prints a proposal from the scores file and pi's catalogue without writing anything", async () => {
@@ -224,6 +224,16 @@ describe("pi extension", () => {
       await command("jev-router", "suggest --write");
       expect(notes.at(-1)).toEqual([expect.stringContaining("nothing to write"), "warning"]);
       expect(readFileSync(generatedFile, "utf8")).toBe(previous);
+    });
+
+    test("--write warns instead of throwing when the generated file can't be written", async () => {
+      writeScores({ "testprov/prem-a": { score: 0.9 } });
+      mkdirSync(join(generatedFile, "blocker"), { recursive: true });
+      const { command, notes } = await load();
+
+      await command("jev-router", "suggest --write");
+      expect(notes.at(-1)).toEqual([expect.stringContaining(`can't write ${generatedFile}`), "warning"]);
+      expect(readdirSync(agentDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     });
 
     test("a missing scores file warns with its path", async () => {

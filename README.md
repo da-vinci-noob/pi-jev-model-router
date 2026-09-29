@@ -496,8 +496,8 @@ fetches rankings itself; any script or board export that writes this JSON works.
 
 `/jev-router suggest` prints the proposal. `/jev-router suggest --write` saves it
 to `~/.pi/agent/pi-jev-model-router.generated.json` and applies it right away.
-It refuses to write an empty proposal, so a bad scores file never wipes a good
-generated file.
+If none of the scored models match pi's catalogue, `--write` warns and leaves
+the existing generated file untouched.
 
 That file is loaded **before** your own config, and your config file is never
 written. So anything you set by hand wins over the generated file:
