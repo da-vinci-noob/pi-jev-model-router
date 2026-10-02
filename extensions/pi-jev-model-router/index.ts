@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import {
   formatUsd,
@@ -316,6 +316,18 @@ function decisionModelKey(decision: Decision): string {
   return `${provider}/${model}`;
 }
 
+/** The first entry in a chain pi can actually serve, paired with its model. */
+function firstServable(
+  chain: readonly RouteTarget[],
+  models: readonly AvailableModel[],
+): { target: RouteTarget; model: AvailableModel } | undefined {
+  for (const target of chain) {
+    const model = findModel(models, target);
+    if (model) return { target, model };
+  }
+  return undefined;
+}
+
 /**
  * Ask before switching into a tier listed in `confirm.tiers`.
  *
@@ -353,13 +365,12 @@ async function guardTierSwitch(
   const choice = answer.trim().toLowerCase();
   if (choice === "" || choice === "y" || choice === "yes") return undefined;
   if (choice === "0") {
-    const free = runtime.config.free.enabled
-      ? runtime.config.free.pool.find((t) => findModel(runtime.models, t))
+    const servable = runtime.config.free.enabled
+      ? firstServable(runtime.config.free.pool, runtime.models)
       : undefined;
-    const model = free ? findModel(runtime.models, free) : undefined;
-    if (!free || !model) return { keep: true, rerouted: false };
-    decision.model = model;
-    decision.target = free;
+    if (!servable) return { keep: true, rerouted: false };
+    decision.model = servable.model;
+    decision.target = servable.target;
     // The pool sits below `TIERS`, so record it at the cheapest rung.
     decision.tierIndex = 0;
     decision.notes.push("user forced the free pool");
@@ -368,11 +379,10 @@ async function guardTierSwitch(
 
   if (/^[1-5]$/.test(choice)) {
     const tier = TIERS[Number(choice) - 1];
-    const chosen = runtime.config.routes[tier].find((t) => findModel(runtime.models, t));
-    const model = chosen ? findModel(runtime.models, chosen) : undefined;
-    if (chosen && model) {
-      decision.model = model;
-      decision.target = chosen;
+    const servable = firstServable(runtime.config.routes[tier], runtime.models);
+    if (servable) {
+      decision.model = servable.model;
+      decision.target = servable.target;
       decision.tier = tier;
       decision.tierIndex = tierIndex(tier);
       decision.notes.push(`user forced tier ${tier}`);
@@ -434,26 +444,26 @@ async function applyDecision(
     options.allowPrompt !== false &&
     typeof ctx.ui?.select === "function"
   ) {
-    const cheaper = TIERS[Math.max(0, decision.tierIndex - 1)];
-    const cheaperTarget = runtime.config.routes[cheaper][0];
-    const options_ = [
-      `Use ${decision.tier} — ${target}`,
-      `Use ${cheaper} — ${cheaperTarget.provider}/${cheaperTarget.model}`,
-      `Keep ${currentModelKey(ctx) ?? "current model"}`,
-    ];
+    // `TIERS[decision.tierIndex - 1]` is undefined at `quick`, so the cheaper rung is
+    // offered only when there is one. It was previously clamped to `quick`, which
+    // rendered "Use quick" twice on an already-cheap turn.
+    const cheaper = TIERS[decision.tierIndex - 1];
+    const servable = cheaper ? firstServable(runtime.config.routes[cheaper], runtime.models) : undefined;
+    const options_ = [`Use ${decision.tier} — ${target}`];
+    if (cheaper && servable) {
+      options_.push(`Use ${cheaper} — ${servable.target.provider}/${servable.target.model}`);
+    }
+    options_.push(`Keep ${currentModelKey(ctx) ?? "current model"}`);
     const choice = await ctx.ui.select(`Jev suggests ${decision.tier}\n${detail}`, options_);
     if (!choice || choice.startsWith("Keep")) {
       appendDecisionEntry(analysis, decision, "skipped", runtime);
       return { action: "skipped", message: "kept current model" };
     }
-    if (choice.startsWith(`Use ${cheaper}`)) {
-      const cheaperModel = findModel(runtime.models, cheaperTarget);
-      if (cheaperModel) {
-        decision.model = cheaperModel;
-        decision.target = cheaperTarget;
-        decision.tier = cheaper;
-        decision.tierIndex = tierIndex(cheaper);
-      }
+    if (cheaper && servable && choice.startsWith(`Use ${cheaper}`)) {
+      decision.model = servable.model;
+      decision.target = servable.target;
+      decision.tier = cheaper;
+      decision.tierIndex = tierIndex(cheaper);
     }
   }
 

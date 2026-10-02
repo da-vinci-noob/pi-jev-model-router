@@ -60,13 +60,14 @@ function stubFetch(respond: () => Response): void {
   }) as typeof fetch;
 }
 
-async function load(options: { minimal?: boolean; answer?: string | undefined } = {}) {
+async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string } } = {}) {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
   const setModel: unknown[] = [];
   const thinking: unknown[] = [];
-  const dialogs: Array<{ title: string; placeholder?: string; opts?: unknown }> = [];
+  const dialogs: Array<{ title: string; placeholder?: string; opts?: unknown; options?: string[] }> = [];
   let answer = options.answer;
+  const selectAnswer = options.select;
   const fake: Record<string, unknown> = { on: (event: string, handler: Handler) => handlers.set(event, handler) };
   if (!options.minimal) {
     Object.assign(fake, {
@@ -82,7 +83,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined } 
   const notes: Array<[string, string]> = [];
   const ctx = {
     cwd,
-    model: models[0],
+    model: options.current ?? models[0],
     modelRegistry: {
       getAvailable: () => models,
       find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
@@ -90,6 +91,10 @@ async function load(options: { minimal?: boolean; answer?: string | undefined } 
     ui: {
       notify: (text: string, level: string) => notes.push([text, level]),
       setStatus: () => {},
+      select: async (title: string, options: string[]) => {
+        dialogs.push({ title, options });
+        return selectAnswer;
+      },
       input: async (title: string, placeholder?: string, opts?: unknown) => {
         dialogs.push({ title, placeholder, opts });
         return answer;
@@ -181,6 +186,49 @@ describe("pi extension", () => {
     const { notes } = await load();
 
     expect(notes.filter(([text]) => text.includes("no models are configured"))).toEqual([]);
+  });
+
+  describe("confirm mode", () => {
+    test("offers the cheaper rung only when there is one", async () => {
+      writeProjectConfig({
+        apiKey: "test-key",
+        mode: "confirm",
+        routes: {
+          quick: [{ provider: "testprov", model: "quick-a" }],
+          standard: [{ provider: "testprov", model: "std-a" }],
+          high: [{ provider: "testprov", model: "high-a" }],
+          premium: [{ provider: "testprov", model: "prem-a" }],
+          xpremium: [],
+        },
+      });
+      stubFetch(() => Response.json(jevAnswers("implement", 3)));
+      const { input, dialogs, setModel } = await load({ select: "Use high — testprov/high-a" });
+
+      // Premium demand lands on premium, whose cheaper rung is high.
+      await input("plan a migration for the upload client");
+      expect(dialogs[0].options).toEqual([
+        "Use premium — testprov/prem-a",
+        "Use high — testprov/high-a",
+        "Keep testprov/quick-a",
+      ]);
+      expect(setModel).toEqual([models[2]]);
+    });
+
+    test("never lists the same tier twice on a quick turn", async () => {
+      writeProjectConfig({ apiKey: "test-key", mode: "confirm" });
+      // score 0 lands below standard, so the decision is quick itself. The
+      // current model is moved off the quick pick so confirm actually opens.
+      stubFetch(() => Response.json(jevAnswers("chat", 0)));
+      const { input, dialogs, setModel } = await load({
+        select: "Keep testprov/std-a",
+        current: { provider: "testprov", id: "std-a" },
+      });
+
+      await input("what does this error mean in general terms");
+      // Two entries, not three: the old clamp repeated "Use quick".
+      expect(dialogs[0].options).toEqual(["Use quick — testprov/quick-a", "Keep testprov/std-a"]);
+      expect(setModel).toEqual([]);
+    });
   });
 
   describe("confirm.tiers gate", () => {
