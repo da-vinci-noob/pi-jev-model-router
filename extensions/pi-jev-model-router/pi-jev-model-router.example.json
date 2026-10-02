@@ -113,5 +113,10 @@
       { "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" },
       { "provider": "opencode-go", "model": "longcat-2.5-preview-free", "thinkingLevel": "medium" }
     ]
+  },
+  "confirm": {
+    "tiers": ["xpremium"],
+    "timeoutMs": 10000,
+    "onTimeout": "accept"
   }
 }

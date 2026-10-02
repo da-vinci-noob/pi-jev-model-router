@@ -309,3 +309,45 @@ describe("api key resolution", () => {
     expect(apiKeyFor(base)).toBe("");
   });
 });
+
+describe("confirm gate config", () => {
+  test("defaults to guarding xpremium only, with a timeout", () => {
+    expect(DEFAULT_CONFIG.confirm).toEqual({ tiers: ["xpremium"], timeoutMs: 10000, onTimeout: "accept" });
+  });
+
+  test("tiers, timeoutMs and onTimeout are read from JSON", () => {
+    writeProject({ confirm: { tiers: ["premium", "xpremium"], timeoutMs: 2500, onTimeout: "reject" } });
+    expect(loadConfig(cwd).confirm).toEqual({
+      tiers: ["premium", "xpremium"],
+      timeoutMs: 2500,
+      onTimeout: "reject",
+    });
+  });
+
+  test("an empty tier list turns the gate off without touching the rest", () => {
+    writeProject({ confirm: { tiers: [] } });
+    const confirm = loadConfig(cwd).confirm;
+    expect(confirm.tiers).toEqual([]);
+    expect(confirm.timeoutMs).toBe(DEFAULT_CONFIG.confirm.timeoutMs);
+  });
+
+  test("unknown tiers, bad timeouts and bad policies fall back to the defaults", () => {
+    writeProject({
+      confirm: { tiers: ["xpremium", "sideways", 7], timeoutMs: -1, onTimeout: "maybe" },
+    });
+    const confirm = loadConfig(cwd).confirm;
+    expect(confirm.tiers).toEqual(["xpremium"]);
+    expect(confirm.timeoutMs).toBe(DEFAULT_CONFIG.confirm.timeoutMs);
+    expect(confirm.onTimeout).toBe(DEFAULT_CONFIG.confirm.onTimeout);
+  });
+
+  test("a non-array tiers value keeps the defaults", () => {
+    writeProject({ confirm: { tiers: "premium" } });
+    expect(loadConfig(cwd).confirm.tiers).toEqual(["xpremium"]);
+  });
+
+  test("timeoutMs 0 is preserved so the dialog can wait forever", () => {
+    writeProject({ confirm: { timeoutMs: 0 } });
+    expect(loadConfig(cwd).confirm.timeoutMs).toBe(0);
+  });
+});

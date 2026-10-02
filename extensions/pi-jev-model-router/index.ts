@@ -55,7 +55,7 @@ const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it
 
 /** Data rendered in the transcript for every routing decision (never sent to the LLM). */
 interface DecisionEntry {
-  action: "switched" | "kept" | "notified" | "skipped";
+  action: "switched" | "kept" | "notified" | "skipped" | "rerouted";
   tier: string;
   model: string;
   kind: string;
@@ -298,8 +298,88 @@ async function analyse(
 }
 
 interface ApplyResult {
-  action: "switched" | "kept" | "notified" | "skipped";
+  action: "switched" | "kept" | "notified" | "skipped" | "rerouted";
   message: string;
+}
+
+interface GuardOutcome {
+  /** The user declined, or the timeout policy rejected. The switch is abandoned. */
+  keep: boolean;
+  /** The user picked a different tier, so `decision` was rewritten in place. */
+  rerouted: boolean;
+}
+
+/** The model a decision currently points at, as `provider/model`. */
+function decisionModelKey(decision: Decision): string {
+  const provider = decision.model ? decision.model.provider : decision.target.provider;
+  const model = decision.model ? decision.model.id : decision.target.model;
+  return `${provider}/${model}`;
+}
+
+/**
+ * Ask before switching into a tier listed in `confirm.tiers`.
+ *
+ * `Y` or Enter accepts, `N` keeps the current model, `0` forces the free pool,
+ * and `1` to `5` jump straight to a tier (`TIERS[0]` is `1`). Anything else is
+ * treated as a decline, so a mistyped key never spends an expensive model.
+ *
+ * A reroute rewrites `decision` and returns so the common switch path below
+ * stays the only place that switches models.
+ */
+async function guardTierSwitch(
+  decision: Decision,
+  ctx: ExtensionContext,
+  runtime: Runtime,
+  options: { allowPrompt?: boolean },
+): Promise<GuardOutcome | undefined> {
+  const { confirm } = runtime.config;
+  if (options.allowPrompt === false) return undefined;
+  if (!confirm.tiers.includes(decision.tier)) return undefined;
+  if (typeof ctx.ui?.input !== "function") return undefined;
+
+  const ladder = TIERS.map((tier, index) => `${index + 1} ${tier}`).join("   ");
+  const answer = await ctx.ui.input(
+    `Jev → ${decision.tier} (${decisionModelKey(decision)})\n${decision.reason}`,
+    `Y/Enter switch · N keep · 0 free · ${ladder}`,
+    confirm.timeoutMs > 0 ? { timeout: confirm.timeoutMs } : undefined,
+  );
+
+  // `undefined` is a dismiss or a timeout; an empty string is Enter, which accepts.
+  if (answer === undefined) {
+    if (confirm.onTimeout === "reject") return { keep: true, rerouted: false };
+    return undefined;
+  }
+
+  const choice = answer.trim().toLowerCase();
+  if (choice === "" || choice === "y" || choice === "yes") return undefined;
+  if (choice === "0") {
+    const free = runtime.config.free.enabled
+      ? runtime.config.free.pool.find((t) => findModel(runtime.models, t))
+      : undefined;
+    const model = free ? findModel(runtime.models, free) : undefined;
+    if (!free || !model) return { keep: true, rerouted: false };
+    decision.model = model;
+    decision.target = free;
+    // The pool sits below `TIERS`, so record it at the cheapest rung.
+    decision.tierIndex = 0;
+    decision.notes.push("user forced the free pool");
+    return { keep: false, rerouted: true };
+  }
+
+  if (/^[1-5]$/.test(choice)) {
+    const tier = TIERS[Number(choice) - 1];
+    const chosen = runtime.config.routes[tier].find((t) => findModel(runtime.models, t));
+    const model = chosen ? findModel(runtime.models, chosen) : undefined;
+    if (chosen && model) {
+      decision.model = model;
+      decision.target = chosen;
+      decision.tier = tier;
+      decision.tierIndex = tierIndex(tier);
+      decision.notes.push(`user forced tier ${tier}`);
+      return { keep: false, rerouted: true };
+    }
+  }
+  return { keep: true, rerouted: false };
 }
 
 async function applyDecision(
@@ -312,8 +392,8 @@ async function applyDecision(
   const target = decision.model
     ? `${decision.model.provider}/${decision.model.id}`
     : `${decision.target.provider}/${decision.target.model}`;
-  const headline = `Jev → ${decision.tier} (${target})`;
-  const detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
+  let headline = `Jev → ${decision.tier} (${target})`;
+  let detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
   const currentKey = currentModelKey(ctx);
   const targetKey = decision.model ? `${decision.model.provider}/${decision.model.id}` : undefined;
   const keepCurrent =
@@ -333,6 +413,19 @@ async function applyDecision(
     notify(ctx, `${headline}\n${detail}`, "info");
     appendDecisionEntry(analysis, decision, "notified", runtime);
     return { action: "notified", message: `${headline} (notify only)` };
+  }
+
+  // An expensive-tier approval gate, independent of `mode`. It runs before the
+  // `confirm` select so a guarded tier asks once, not twice.
+  const guard = await guardTierSwitch(decision, ctx, runtime, options);
+  if (guard?.keep) {
+    appendDecisionEntry(analysis, decision, "skipped", runtime);
+    return { action: "skipped", message: "kept current model" };
+  }
+  if (guard?.rerouted) {
+    // The target moved after the headline was built, so rebuild it for the notice.
+    headline = `Jev → ${decision.tier} (${decisionModelKey(decision)})`;
+    detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
   }
 
   // Confirm mode needs a working select prompt; otherwise fall through to auto-switch.
@@ -390,8 +483,8 @@ async function applyDecision(
   runtime.lastAnalysis = analysis;
   statusLine(ctx, runtime);
   notify(ctx, `${headline}\n${detail}`, "info");
-  appendDecisionEntry(analysis, decision, "switched", runtime);
-  return { action: "switched", message: `${headline}` };
+  appendDecisionEntry(analysis, decision, guard?.rerouted ? "rerouted" : "switched", runtime);
+  return { action: guard?.rerouted ? "rerouted" : "switched", message: `${headline}` };
 }
 
 // The ExtensionAPI instance for the running session, captured at load time.
