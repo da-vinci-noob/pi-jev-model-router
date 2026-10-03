@@ -585,6 +585,81 @@ switches. A guarded tier asks once, not once per layer.
 A tier jump records a `rerouted` decision, so `/jev-router why` shows the tier
 Jev judged alongside the model that actually served the turn.
 
+## Codex quota guards
+
+Subscription quota is independent of dollar spend. An opt-in Codex guard skips
+models whose remaining account quota is below a configured floor, then walks the
+existing fallback chains:
+
+```json
+{
+  "quota": {
+    "openai-codex": {
+      "cacheTtlSec": 120,
+      "onUnknown": "use",
+      "minQuota": { "fiveHour": 0.05, "weekly": 0.05 }
+    }
+  },
+  "routes": {
+    "premium": [
+      {
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+        "minQuota": { "weekly": 0.20 }
+      },
+      {
+        "provider": "openai-codex",
+        "model": "gpt-5.3-codex",
+        "minQuota": { "fiveHour": 0.05 }
+      },
+      { "provider": "openrouter", "model": "openai/gpt-5.4-mini" }
+    ]
+  }
+}
+```
+
+Ratios are **remaining**, not used: `0.20` means 20% must remain. Equality passes.
+Provider floors apply to every resolved Codex model; target floors in `routes`,
+`kindModels`, or `free.pool` can only make them stricter. Codex quota is one
+account pool, not a separate allowance for each model. Only `fiveHour` and
+`weekly` are supported in this first version; other providers are unchanged.
+
+Adding the `quota.openai-codex` object enables the reader (`enabled: false`
+disables it). Without that object, no quota requests or gates run. Floors on
+individual targets are inert until the reader is enabled. `cacheTtlSec` defaults
+to 120 (valid range 1–86400 seconds); `onUnknown` defaults to `use`.
+
+The reader uses Pi's resolved `openai-codex` credentials and the fixed endpoint
+`https://chatgpt.com/backend-api/wham/usage`. You do not need to copy tokens into
+config. It refreshes in the background from `session_start`, with a five-second
+refresh deadline, and stops on `session_shutdown`. Routing never waits for a
+quota HTTP request. Readings are in memory only; authentication errors and HTTP
+response bodies are not logged. The endpoint is provider-specific and may change.
+
+Missing windows, expired readings, and readings whose reset time has passed are
+**unknown**. `use` admits those models with a visible note; `skip` rejects them.
+Startup can be unknown until the first background fetch completes. A failed
+refresh does not extend the old reading's freshness. The reader refreshes at the
+earlier of the TTL or the next reported reset; a nearby reset never waives a floor
+or assumes the account is full.
+
+Quota checks also apply to cache retention, confirmation overrides, and
+`/jev-router revert`. Rejections appear in decision notes and `/jev-router why`,
+for example `gpt-5.4 skipped: codex weekly 17.0% < 20.0%`.
+
+If no eligible route exists and the current model is also quota-ineligible, the
+router explicitly reports **prompt not sent** instead of submitting it to that
+model. The same protection applies if a confirmation keeps an ineligible current
+model, or routing fails. Choose another model or retry after a refresh; blocked
+prompts are not queued automatically. `notify` mode still never switches, but can
+block submission to a quota-ineligible current model. `/jev-router off` disables
+routing and its submission protection. Extension-generated input remains outside
+the routing hook.
+
+This reduces the risk of mid-flight cancellation; it cannot reserve quota or
+predict how much a long-running turn will consume. Model-scoped quotas, generic
+HTTP adapters, and turn-dependent floors are deliberately deferred.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -650,6 +725,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `ranking` | cut-offs `0.5 / 0.7 / 0.85`, `spreadProviders: true` | Scores file and cut-offs for `/jev-router suggest` |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `confirm` | `tiers: ["xpremium"]`, `timeoutMs: 10000`, `onTimeout: "accept"` | Ask before switching into these tiers; `0` forces the free pool, `1` to `5` jump to a tier |
+| `quota` | disabled | Cached Codex 5h/weekly remaining-quota floors, independent of spend |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
@@ -762,6 +838,7 @@ of failing installation:
 | `ctx.ui.select` | `confirm` mode falls back to auto-switching |
 | `ctx.ui.input` | The `confirm.tiers` gate falls back to auto-switching |
 | `ctx.modelRegistry.find` / `getAvailable` | Reports "model not available in this build" and leaves the current model in place |
+| `ctx.modelRegistry.getApiKeyForProvider` | Codex quota is unknown; applies `quota.openai-codex.onUnknown` |
 | `registerCommand` / `registerTool` | Commands and the tool are not registered; event-driven routing still works |
 
 Nothing in the extension throws during load if an optional API is missing, so

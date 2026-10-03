@@ -21,6 +21,7 @@ const realFetch = globalThis.fetch;
 const savedKey = process.env.TYPESAFE_API_KEY;
 let cwd: string;
 let fetchCalls: string[];
+const shutdowns: Array<() => Promise<unknown>> = [];
 
 function writeProjectConfig(patch: Record<string, unknown>): void {
   mkdirSync(join(cwd, ".pi"), { recursive: true });
@@ -60,7 +61,8 @@ function stubFetch(respond: () => Response): void {
   }) as typeof fetch;
 }
 
-async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string } } = {}) {
+async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string }; models?: typeof models; token?: string } = {}) {
+  const availableModels = options.models ?? models;
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
   const setModel: unknown[] = [];
@@ -85,8 +87,9 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
     cwd,
     model: options.current ?? models[0],
     modelRegistry: {
-      getAvailable: () => models,
-      find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+      getAvailable: () => availableModels,
+      find: (provider: string, id: string) => availableModels.find((m) => m.provider === provider && m.id === id),
+      getApiKeyForProvider: async () => options.token,
     },
     ui: {
       notify: (text: string, level: string) => notes.push([text, level]),
@@ -104,6 +107,8 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
     getContextUsage: () => ({ tokens: 0 }),
   };
   await handlers.get("session_start")!({}, ctx);
+  shutdowns.push(() => handlers.get("session_shutdown")!({}, ctx));
+  if (options.token) await new Promise((resolve) => setTimeout(resolve, 0));
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
   const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
   return { input, command, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
@@ -116,7 +121,8 @@ beforeEach(() => {
   writeProjectConfig({ apiKey: "test-key" });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const shutdown of shutdowns.splice(0)) await shutdown();
   globalThis.fetch = realFetch;
   if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY;
   else process.env.TYPESAFE_API_KEY = savedKey;
@@ -396,6 +402,122 @@ describe("pi extension", () => {
 
       await input("plan a migration for the upload client");
       expect(dialogs).toEqual([]);
+    });
+  });
+
+  describe("Codex quota integration", () => {
+    const codexModels = ["sol", "luna"].map((id) => ({ provider: "openai-codex", id, cost }));
+    const sol = { provider: "openai-codex", model: "sol", minQuota: { weekly: 0.2 } };
+    const luna = { provider: "openai-codex", model: "luna", minQuota: { fiveHour: 0.05 } };
+    function setup(patch: Record<string, unknown> = {}, fiveHourUsed = 90, weeklyUsed = 83) {
+      writeProjectConfig({
+        apiKey: "test-key",
+        quota: { "openai-codex": { minQuota: { fiveHour: 0.05 }, onUnknown: "skip" } },
+        routes: { quick: [{ provider: "testprov", model: "quick-a" }], standard: [], high: [], premium: [sol, luna], xpremium: [] },
+        kindModels: {},
+        ...patch,
+      });
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        fetchCalls.push(String(url));
+        return String(url).includes("wham/usage") ? Response.json({ rate_limit: {
+          primary_window: { used_percent: fiveHourUsed, limit_window_seconds: 18000 },
+          secondary_window: { used_percent: weeklyUsed, limit_window_seconds: 604800 },
+        } }) : Response.json(jevAnswers("implement", 3));
+      }) as typeof fetch;
+    }
+    const loadCodex = (options: Parameters<typeof load>[0] = {}) => load({ models: [...models, ...codexModels], token: "test-token", ...options });
+
+    test("falls back within the account chain and exposes the reason in why", async () => {
+      setup();
+      const { input, setModel, command, notes } = await loadCodex();
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([codexModels[1]]);
+      await command("jev-router", "why");
+      expect(notes.some(([text]) => text.includes("sol skipped: codex weekly 17.0% < 20.0%"))).toBe(true);
+      expect(fetchCalls.filter((url) => url.includes("wham/usage"))).toHaveLength(1);
+    });
+    test("shared-pool exhaustion walks to another provider", async () => {
+      setup({}, 99, 10);
+      const { input, setModel } = await loadCodex({ current: codexModels[0] });
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([models[0]]);
+    });
+    test("tier override cannot select a quota-rejected target", async () => {
+      setup({ confirm: { tiers: ["premium"] } });
+      const { input, setModel, dialogs } = await loadCodex({ answer: "4" });
+      await input("plan a migration for the upload client");
+      expect(dialogs).toHaveLength(1);
+      expect(setModel).toEqual([codexModels[1]]);
+    });
+    test("free override also rejects quota-ineligible models", async () => {
+      setup({ confirm: { tiers: ["premium"] }, free: { enabled: true, policy: "fallback-only", pool: [sol, { provider: "testprov", model: "quick-a" }] } });
+      const { input, setModel } = await loadCodex({ answer: "0" });
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([models[0]]);
+    });
+    test("select-mode cheaper options filter quota-ineligible candidates", async () => {
+      setup({ mode: "confirm", routes: { premium: [{ provider: "testprov", model: "prem-a" }], high: [sol, { provider: "testprov", model: "high-a" }] } });
+      const { input, dialogs, setModel } = await loadCodex({ select: "Use high — testprov/high-a" });
+      await input("plan a migration for the upload client");
+      expect(dialogs[0].options).toContain("Use high — testprov/high-a");
+      expect(setModel).toEqual([models[2]]);
+    });
+    test("all rejected routes block input instead of using an exhausted current model", async () => {
+      setup({ routes: { quick: [], standard: [], high: [], premium: [sol, luna], xpremium: [] } }, 99, 99);
+      const { input, setModel, notes, command } = await loadCodex({ current: codexModels[0] });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "handled" });
+      expect(setModel).toEqual([]);
+      expect(notes.some(([text]) => text.includes("prompt not sent"))).toBe(true);
+      await command("jev-router", "why");
+      expect(notes.at(-1)?.[0]).toContain("luna skipped");
+    });
+    test("declining a switch cannot silently keep an exhausted current model", async () => {
+      setup({ confirm: { tiers: ["premium"] } });
+      const { input, notes } = await loadCodex({ current: codexModels[0], answer: "n" });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "handled" });
+      expect(notes.some(([text]) => text.includes("prompt not sent"))).toBe(true);
+    });
+    test("acknowledgements still reroute an exhausted current model", async () => {
+      setup();
+      const { input, setModel } = await loadCodex({ current: codexModels[0] });
+      await input("continue");
+      expect(setModel).toEqual([codexModels[1]]);
+    });
+    test("notify mode blocks an exhausted current model without switching", async () => {
+      setup({ mode: "notify" });
+      const { input, setModel, notes } = await loadCodex({ current: codexModels[0] });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "handled" });
+      expect(setModel).toEqual([]);
+      expect(notes.some(([text]) => text.includes("prompt not sent"))).toBe(true);
+    });
+    test("Jev failure cannot fall through to an exhausted current model", async () => {
+      setup();
+      const { input, notes } = await loadCodex({ current: codexModels[0] });
+      globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "handled" });
+      expect(notes.some(([text]) => text.includes("prompt not sent"))).toBe(true);
+    });
+    test("unknown use is visible even when stickiness keeps the current model", async () => {
+      setup({ quota: { "openai-codex": { onUnknown: "use" } } });
+      const { input, setModel, notes } = await loadCodex({ token: undefined, current: codexModels[0] });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "continue" });
+      expect(setModel).toEqual([]);
+      expect(notes.some(([text]) => text.includes("quota unknown"))).toBe(true);
+    });
+    test("quota opt-out preserves routing even with target floors", async () => {
+      setup({ quota: { "openai-codex": { enabled: false } } });
+      const { input, setModel } = await loadCodex();
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([codexModels[0]]);
+      expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
+    });
+    test("startup unknown use emits a warning without needing credentials", async () => {
+      setup({ quota: { "openai-codex": { onUnknown: "use" } } });
+      const { input, setModel, notes } = await loadCodex({ token: undefined });
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([codexModels[0]]);
+      expect(notes.some(([text]) => text.includes("quota unknown"))).toBe(true);
+      expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
     });
   });
 

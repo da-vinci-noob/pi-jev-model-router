@@ -31,6 +31,20 @@ export interface RouteTarget {
   minTier?: Tier;
   /** Only used inside `kindModels`: higher wins among eligible specialists. Defaults to 0. */
   priority?: number;
+  /** Minimum remaining account-quota ratios (0..1), currently Codex only. */
+  minQuota?: QuotaFloors;
+}
+
+export const QUOTA_WINDOWS = ["fiveHour", "weekly"] as const;
+export type QuotaWindow = (typeof QUOTA_WINDOWS)[number];
+export type QuotaFloors = Partial<Record<QuotaWindow, number>>;
+
+export interface CodexQuotaConfig {
+  enabled: boolean;
+  cacheTtlSec: number;
+  onUnknown: "use" | "skip";
+  /** Floors shared by every resolved openai-codex model. */
+  minQuota: QuotaFloors;
 }
 
 /** Approval guard for switches into an expensive tier. */
@@ -158,6 +172,7 @@ export interface JevRouterConfig {
   taskKinds: Record<string, string>;
   ranking: RankingConfig;
   confirm: ConfirmConfig;
+  quota: { "openai-codex"?: CodexQuotaConfig };
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -305,6 +320,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     cutoffs: { standard: 0.5, high: 0.7, premium: 0.85 },
     spreadProviders: true,
   },
+  quota: {},
   confirm: {
     tiers: ["xpremium"],
     timeoutMs: 10000,
@@ -326,6 +342,16 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+export function normalizeQuotaFloors(value: unknown): QuotaFloors {
+  const floors: QuotaFloors = {};
+  const raw = asRecord(value);
+  for (const window of QUOTA_WINDOWS) {
+    const floor = raw[window];
+    if (typeof floor === "number" && Number.isFinite(floor) && floor >= 0 && floor <= 1) floors[window] = floor;
+  }
+  return floors;
+}
+
 function normalizeChain(value: unknown): RouteChain | undefined {
   const list = Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
   const targets = list.filter(
@@ -333,9 +359,11 @@ function normalizeChain(value: unknown): RouteChain | undefined {
       Boolean(item) && typeof item === "object" && typeof (item as RouteTarget).provider === "string" && typeof (item as RouteTarget).model === "string",
   );
   if (targets.length === 0) return undefined;
-  return targets.map((t) =>
-    t.priority === undefined || Number.isFinite(t.priority) ? t : { ...t, priority: undefined },
-  );
+  return targets.map((t) => ({
+    ...t,
+    priority: t.priority === undefined || Number.isFinite(t.priority) ? t.priority : undefined,
+    minQuota: t.minQuota === undefined ? undefined : normalizeQuotaFloors(t.minQuota),
+  }));
 }
 
 function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
@@ -401,6 +429,19 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
         ? confirmPatch.onTimeout
         : base.confirm.onTimeout,
   };
+  const quota = { ...base.quota };
+  const rawCodex = asRecord(p.quota)["openai-codex"];
+  if (rawCodex && typeof rawCodex === "object" && !Array.isArray(rawCodex)) {
+    const patch = asRecord(rawCodex);
+    const previous = quota["openai-codex"];
+    quota["openai-codex"] = {
+      enabled: typeof patch.enabled === "boolean" ? patch.enabled : previous?.enabled ?? true,
+      cacheTtlSec: typeof patch.cacheTtlSec === "number" && Number.isFinite(patch.cacheTtlSec) && patch.cacheTtlSec >= 1 && patch.cacheTtlSec <= 86400
+        ? patch.cacheTtlSec : previous?.cacheTtlSec ?? 120,
+      onUnknown: patch.onUnknown === "use" || patch.onUnknown === "skip" ? patch.onUnknown : previous?.onUnknown ?? "use",
+      minQuota: { ...previous?.minQuota, ...normalizeQuotaFloors(patch.minQuota) },
+    };
+  }
   return {
     ...base,
     ...(p as Partial<JevRouterConfig>),
@@ -410,6 +451,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     free,
     ranking,
     confirm,
+    quota,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {
