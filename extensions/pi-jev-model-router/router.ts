@@ -1,8 +1,17 @@
-import type { JevRouterConfig, RouteChain, RouteTarget, Tier } from "./config";
+import type { JevRouterConfig, RouteTarget, Tier } from "./config";
 import { TIERS } from "./config";
 import type { SpendSnapshot } from "./budget";
 import { formatUsd } from "./budget";
 import type { RouteAnalysis } from "./jev";
+import type { QuotaEligibility } from "./quota";
+
+export type TargetEligibility = (target: RouteTarget, model: AvailableModel) => QuotaEligibility;
+
+export function eligibleTarget(target: RouteTarget, model: AvailableModel, eligibility?: TargetEligibility, notes?: string[]): boolean {
+  const result = eligibility?.(target, model);
+  for (const note of result?.notes ?? []) if (notes && !notes.includes(note)) notes.push(note);
+  return result?.allowed ?? true;
+}
 
 export interface AvailableModel {
   provider: string;
@@ -57,11 +66,13 @@ export function findModel(
 
 export function firstAvailable(
   models: readonly AvailableModel[],
-  chain: RouteChain,
+  chain: readonly RouteTarget[],
+  eligibility?: TargetEligibility,
+  notes?: string[],
 ): { target: RouteTarget; model: AvailableModel } | undefined {
   for (const target of chain) {
     const model = findModel(models, target);
-    if (model) return { target, model };
+    if (model && eligibleTarget(target, model, eligibility, notes)) return { target, model };
   }
   return undefined;
 }
@@ -74,11 +85,11 @@ export function kindCandidates(config: JevRouterConfig, kind: string, index: num
 }
 
 /** The specialist that wins at each tier from the kind's floor up, merging runs, e.g. `high: a · premium: b`. */
-export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string): string {
+export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string, eligibility?: TargetEligibility): string {
   const spans: { from: Tier; to: Tier; model: string }[] = [];
   const top = config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM;
   for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), PREMIUM); i <= top; i += 1) {
-    const model = firstAvailable(models, kindCandidates(config, kind, i))?.model.id ?? "tier chain";
+    const model = firstAvailable(models, kindCandidates(config, kind, i), eligibility)?.model.id ?? "tier chain";
     const last = spans[spans.length - 1];
     if (last?.model === model) last.to = TIERS[i];
     else spans.push({ from: TIERS[i], to: TIERS[i], model });
@@ -105,7 +116,10 @@ export interface DecideOptions {
   /** Tokens currently in context, used to price the cost of a cache miss. */
   contextTokens?: number;
   /** The model in use right now, so we never pay a cache miss for a marginal change. */
-  current?: { index?: number; model?: AvailableModel };
+  current?: { index?: number; model?: AvailableModel; target?: RouteTarget };
+  eligibility?: TargetEligibility;
+  /** Also populated when every candidate is rejected. */
+  notes?: string[];
 }
 
 /**
@@ -135,7 +149,7 @@ function formatTokens(tokens: number | undefined): string {
 }
 
 /** The configured route entry for a model, so a held decision can carry its thinking level. */
-function targetForModel(config: JevRouterConfig, model: AvailableModel): RouteTarget {
+export function targetForModel(config: JevRouterConfig, model: AvailableModel): RouteTarget {
   const match = (chain: readonly RouteTarget[]) =>
     chain.find((t) => t.provider === model.provider && t.model === model.id);
   if (config.free.enabled) {
@@ -168,7 +182,7 @@ export function decide(
   config: JevRouterConfig,
   options: DecideOptions,
 ): Decision | undefined {
-  const notes: string[] = [];
+  const notes: string[] = options.notes ?? [];
   const { spend } = options;
 
   let demand = 0.55 * analysis.complexity + 0.45 * analysis.budgetIntensity;
@@ -250,11 +264,13 @@ export function decide(
   }
   if (config.free.policy === "fallback-only") ordered.push(...freePool);
 
-  const available = firstAvailable(options.models, ordered);
+  const available = firstAvailable(options.models, ordered, options.eligibility, notes);
   if (!available) return undefined;
 
   const currentIndex = options.current?.index;
   const currentModel = options.current?.model;
+  const currentTarget = currentModel ? options.current?.target ?? targetForModel(config, currentModel) : undefined;
+  const currentEligible = !currentModel || !currentTarget || eligibleTarget(currentTarget, currentModel, options.eligibility, notes);
 
   const usedKindChain = kindChain.some(
     (t) => t.provider === available.target.provider && t.model === available.target.model,
@@ -283,6 +299,7 @@ export function decide(
   // clears the current band, or a same-tier specialist swap that is cheap enough.
   if (
     config.cache.aware &&
+    currentEligible &&
     currentIndex !== undefined &&
     currentModel &&
     (currentIndex <= PREMIUM || index > PREMIUM) &&
@@ -314,7 +331,7 @@ export function decide(
       return {
         desiredTier: TIERS[desiredIndex],
         tier: TIERS[currentIndex],
-        target: targetForModel(config, currentModel),
+        target: currentTarget!,
         model: currentModel,
         tierIndex: currentIndex,
         demandScore: demand,

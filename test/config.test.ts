@@ -310,6 +310,27 @@ describe("api key resolution", () => {
   });
 });
 
+describe("quota config", () => {
+  test("disabled by default and opt-in Codex policy has safe defaults", () => {
+    expect(DEFAULT_CONFIG.quota).toEqual({});
+    writeProject({ quota: { "openai-codex": {} } });
+    expect(loadConfig(cwd).quota["openai-codex"]).toEqual({ enabled: true, cacheTtlSec: 120, onUnknown: "use", minQuota: {} });
+  });
+  test("provider and target floors only accept supported ratios", () => {
+    writeProject({
+      quota: { "openai-codex": { cacheTtlSec: 30, onUnknown: "skip", minQuota: { fiveHour: 0.05, weekly: 0.2, monthly: 0.4 } }, other: {} },
+      routes: { premium: [{ provider: "openai-codex", model: "sol", minQuota: { weekly: 0.2, fiveHour: -1, monthly: 0.5 } }] },
+    });
+    const config = loadConfig(cwd);
+    expect(config.quota).toEqual({ "openai-codex": { enabled: true, cacheTtlSec: 30, onUnknown: "skip", minQuota: { fiveHour: 0.05, weekly: 0.2 } } });
+    expect(config.routes.premium[0].minQuota).toEqual({ weekly: 0.2 });
+  });
+  test("invalid policies, TTLs and floors fall back without trusting arbitrary providers", () => {
+    writeProject({ quota: { "openai-codex": { enabled: false, cacheTtlSec: 0, onUnknown: "maybe", minQuota: { weekly: 2, fiveHour: "0.1" } } } });
+    expect(loadConfig(cwd).quota["openai-codex"]).toEqual({ enabled: false, cacheTtlSec: 120, onUnknown: "use", minQuota: {} });
+  });
+});
+
 describe("confirm gate config", () => {
   test("defaults to guarding xpremium only, with a timeout", () => {
     expect(DEFAULT_CONFIG.confirm).toEqual({ tiers: ["xpremium"], timeoutMs: 10000, onTimeout: "accept" });

@@ -14,7 +14,7 @@ policy, and pi switches to the matching model.
 - **Budget-aware** — daily/monthly caps downgrade tiers automatically instead of overspending.
 - **Resilient** — each tier is a candidate chain; if a model is unavailable or unauthenticated, the next one is used.
 - **Visible** — the transcript records the chosen model and the exact reason (kind, complexity, capability, reasoning, budget pressure).
-- **Fails open** — a missing key, timeout, or unknown model just warns and runs your prompt on the current model.
+- **Fails open by default** — a missing key, timeout, or unknown model warns and keeps the current model; opt-in quota protection can stop submission to an ineligible model.
 
 ## How it works
 
@@ -32,7 +32,7 @@ you type a prompt
    code composes the decision
      demand = 0.55·complexity + 0.45·capability (+ reasoning nudge)
      demand = max(demand, kind floor)          # planning/review never go cheap
-     confidence guard → budget guard → availability guard → cache guard
+     confidence guard → budget guard → availability/quota guard → cache guard
         │
         ▼
    pi.setModel(...) + pi.setThinkingLevel(...)  → the turn runs on that model
@@ -585,6 +585,81 @@ switches. A guarded tier asks once, not once per layer.
 A tier jump records a `rerouted` decision, so `/jev-router why` shows the tier
 Jev judged alongside the model that actually served the turn.
 
+## Codex quota guards
+
+Subscription quota is independent of dollar spend. An opt-in Codex guard skips
+models whose remaining account quota is below a configured floor, then walks the
+existing fallback chains:
+
+```json
+{
+  "quota": {
+    "openai-codex": {
+      "cacheTtlSec": 120,
+      "onUnknown": "use",
+      "minQuota": { "fiveHour": 0.05, "weekly": 0.05 }
+    }
+  },
+  "routes": {
+    "premium": [
+      {
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+        "minQuota": { "weekly": 0.20 }
+      },
+      {
+        "provider": "openai-codex",
+        "model": "gpt-5.3-codex",
+        "minQuota": { "fiveHour": 0.05 }
+      },
+      { "provider": "openrouter", "model": "openai/gpt-5.4-mini" }
+    ]
+  }
+}
+```
+
+Ratios are **remaining**, not used: `0.20` means 20% must remain. Equality passes.
+Provider floors apply to every resolved Codex model; target floors in `routes`,
+`kindModels`, or `free.pool` can only make them stricter. Codex quota is one
+account pool, not a separate allowance for each model. Only `fiveHour` and
+`weekly` are supported in this first version; other providers are unchanged.
+
+Adding the `quota.openai-codex` object enables the reader (`enabled: false`
+disables it). Without that object, no quota requests or gates run. Floors on
+individual targets are inert until the reader is enabled. `cacheTtlSec` defaults
+to 120 (valid range 1–86400 seconds); `onUnknown` defaults to `use`.
+
+The reader uses Pi's resolved `openai-codex` credentials and the fixed endpoint
+`https://chatgpt.com/backend-api/wham/usage`. You do not need to copy tokens into
+config. It refreshes in the background from `session_start`, with a five-second
+refresh deadline, and stops on `session_shutdown`. Routing never waits for a
+quota HTTP request. Readings are in memory only; authentication errors and HTTP
+response bodies are not logged. The endpoint is provider-specific and may change.
+
+Missing windows, expired readings, and readings whose reset time has passed are
+**unknown**. `use` admits those models with a visible note; `skip` rejects them.
+Startup can be unknown until the first background fetch completes. A failed
+refresh does not extend the old reading's freshness. The reader refreshes at the
+earlier of the TTL or the next reported reset; a nearby reset never waives a floor
+or assumes the account is full.
+
+Quota checks also apply to cache retention, confirmation overrides, and
+`/jev-router revert`. Rejections appear in decision notes and `/jev-router why`,
+for example `gpt-5.4 skipped: codex weekly 17.0% < 20.0%`.
+
+If no eligible route exists and the current model is also quota-ineligible, the
+router explicitly reports **prompt not sent** instead of submitting it to that
+model. The same protection applies if a confirmation keeps an ineligible current
+model, or routing fails. Choose another model or retry after a refresh; blocked
+prompts are not queued automatically. `notify` mode still never switches, but can
+block submission to a quota-ineligible current model. `/jev-router off` disables
+routing and its submission protection. Extension-generated input remains outside
+the routing hook.
+
+This reduces the risk of mid-flight cancellation; it cannot reserve quota or
+predict how much a long-running turn will consume. Model-scoped quotas, generic
+HTTP adapters, and turn-dependent floors are deliberately deferred.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -650,17 +725,24 @@ to the pool. Check the provider's data policy before enabling it.
 | `ranking` | cut-offs `0.5 / 0.7 / 0.85`, `spreadProviders: true` | Scores file and cut-offs for `/jev-router suggest` |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `confirm` | `tiers: ["xpremium"]`, `timeoutMs: 10000`, `onTimeout: "accept"` | Ask before switching into these tiers; `0` forces the free pool, `1` to `5` jump to a tier |
+| `quota` | disabled | Cached Codex 5h/weekly remaining-quota floors, independent of spend |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
 
 ## Failure behaviour
 
-Routing never blocks your turn. A missing key, network error, timeout (default
-3.5 s, retried on 429/529), or unknown model means: warn in the status line and
-run the prompt on the current model unchanged. Prompts starting with `/`, pure
-acknowledgements (`yes`, `continue`, …), and messages sent by other extensions
-are never routed.
+By default, routing failures do not block your turn. A missing key, network
+error, timeout (default 3.5 s, retried on 429/529), or unknown model warns and
+runs the prompt on the current model unchanged.
+
+[Opt-in quota protection](#codex-quota-guards) is the exception: if routing cannot
+switch safely and the current model is quota-ineligible, the router reports
+**prompt not sent**. Such prompts are not automatically queued.
+
+Prompts starting with `/` and messages sent by other extensions are not routed.
+Acknowledgements (`yes`, `continue`, …) and short continuations normally stay
+on the current model, but are routed when quota protection rejects that model.
 
 ## Publishing to pi.dev/packages
 
@@ -723,9 +805,9 @@ cp -R extensions/pi-jev-model-router ~/.pi/agent/extensions/
 Tests and typecheck (the same checks CI runs on every PR):
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run typecheck   # tsc against the real pi ExtensionAPI types
-bun test            # router, config, Jev client, budget, and extension load/route tests
+bun test            # policy, config, HTTP clients, ranking, and extension integration tests
 ```
 
 Tests stub `fetch`, so they never hit the network. Tests that load config mock
@@ -741,12 +823,21 @@ Layout:
 | `extensions/pi-jev-model-router/router.ts` | composition (`decide`), tier/kind chains, availability fallback |
 | `extensions/pi-jev-model-router/budget.ts` | spend ledger, caps, pressure |
 | `extensions/pi-jev-model-router/ranking.ts` | scores file, tier cut-offs, provider spread for `/jev-router suggest` |
+| `extensions/pi-jev-model-router/quota.ts` | Codex quota readings, eligibility checks, session-owned background cache |
 
 No runtime dependencies: the extension talks to TypeSafe with plain `fetch`. It
 imports `typebox` (tool schema) and `@earendil-works/pi-coding-agent` (config
 directory path), and loads `@earendil-works/pi-tui` **lazily**, only when the host
 implements `registerEntryRenderer`. `@earendil-works/pi-tui` is declared as an
 **optional** peer dependency, so hosts that don't ship it still install and run.
+
+## Contributing
+
+- Work on a feature/fix branch and open a PR targeting `main`; do not push directly to `main`.
+- Use TDD for behavior changes: write a failing test, implement the fix, then refactor with tests green.
+- Add regression coverage and update docs when behavior or configuration changes.
+- Before pushing, run `bun run typecheck`, `bun test`, and `git diff --check`; include results in the PR.
+- Keep tests offline with mocked HTTP and temporary state. See [AGENTS.md](AGENTS.md) for the repo map and development constraints.
 
 ## Compatibility with pi builds and forks
 
@@ -762,6 +853,7 @@ of failing installation:
 | `ctx.ui.select` | `confirm` mode falls back to auto-switching |
 | `ctx.ui.input` | The `confirm.tiers` gate falls back to auto-switching |
 | `ctx.modelRegistry.find` / `getAvailable` | Reports "model not available in this build" and leaves the current model in place |
+| `ctx.modelRegistry.getApiKeyForProvider` | Codex quota is unknown; applies `quota.openai-codex.onUnknown` |
 | `registerCommand` / `registerTool` | Commands and the tool are not registered; event-driven routing still works |
 
 Nothing in the extension throws during load if an optional API is missing, so

@@ -15,8 +15,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
+import { CodexQuotaCache, quotaEligibility } from "./quota";
 import {
   formatUsd,
   loadLedger,
@@ -29,9 +30,11 @@ import {
 import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
 import {
   decide,
+  eligibleTarget,
+  targetForModel,
+  type TargetEligibility,
   describeKindRoutes,
   describeDecision,
-  findModel,
   firstAvailable,
   tierIndex,
   tierForModel,
@@ -49,6 +52,8 @@ interface Runtime {
   previousModelKey?: string;
   appliedTierIndex?: number;
   lastEntrySignature?: string;
+  quota?: CodexQuotaCache;
+  routeNotes: string[];
 }
 
 const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it|proceed|nice|thanks|thank you|ty)[.!]?$/i;
@@ -69,13 +74,14 @@ interface DecisionEntry {
   notes: string[];
   /** Set when the router deliberately did not consult Jev for this prompt. */
   skipReason?: string;
+  blocked?: boolean;
   at: number;
 }
 
 function appendEntry(data: DecisionEntry, runtime: Runtime): void {
   // `appendEntry` is optional across pi builds and forks.
   if (!api || typeof api.appendEntry !== "function") return;
-  const signature = `${data.action}|${data.skipReason ?? ""}|${data.model}|${data.reason}`;
+  const signature = `${data.action}|${data.skipReason ?? ""}|${data.model}|${data.reason}|${data.notes.join("|")}`;
   if (runtime.lastEntrySignature === signature) return;
   runtime.lastEntrySignature = signature;
   try {
@@ -139,7 +145,7 @@ const SKIP_REASONS: Record<string, string> = {
 };
 
 /** Log prompts that were intentionally not routed, so the behaviour is never invisible. */
-function appendSkipEntry(skipReason: string, ctx: ExtensionContext, runtime: Runtime): void {
+function appendSkipEntry(skipReason: string, ctx: ExtensionContext, runtime: Runtime, blocked = false): void {
   if (skipReason === "empty" || skipReason === "slash command") return;
   const model = currentModelKey(ctx) ?? "unknown";
   appendEntry(
@@ -154,11 +160,12 @@ function appendSkipEntry(skipReason: string, ctx: ExtensionContext, runtime: Run
       deepReasoning: 0,
       demand: 0,
       pressure: spendSnapshot(runtime.ledger, runtime.config.budget).pressure,
-      reason:
+      reason: blocked ? "no eligible route — prompt not sent (quota guard)" :
         SKIP_REASONS[skipReason] ??
         `${skipReason} — staying on the current model`,
-      notes: [],
+      notes: skipReason === "no route available" ? [...runtime.routeNotes] : [],
       skipReason,
+      blocked,
       at: Date.now(),
     },
     runtime,
@@ -254,12 +261,32 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   setStatus(ctx, parts.join(" · "));
 }
 
+function eligibilityFor(runtime: Runtime): TargetEligibility {
+  return (target, model) => quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+}
+
+function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
+  if (!ctx.model) return true;
+  const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
+  const target = runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
+    ? runtime.lastDecision.target : targetForModel(runtime.config, model);
+  return eligibleTarget(target, model, eligibilityFor(runtime), notes);
+}
+
+/** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
+function quotaBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
+  if (currentQuotaAllowed(ctx, runtime, notes)) return false;
+  notify(ctx, `jev-router: prompt not sent; current model is quota-ineligible. Choose another model or retry after quota refresh.\n${notes.join("\n")}`, "warning");
+  return true;
+}
+
 async function analyse(
   prompt: string,
   ctx: ExtensionContext,
   runtime: Runtime,
 ): Promise<{ analysis: RouteAnalysis; decision?: Decision } | { error: string }> {
   const config = runtime.config;
+  runtime.routeNotes = [];
   if (!hasApiKey(config)) {
     return { error: `missing API key (env ${config.apiKeyEnv})` };
   }
@@ -289,7 +316,10 @@ async function analyse(
     models: runtime.models,
     spend,
     contextTokens,
+    eligibility: eligibilityFor(runtime),
+    notes: runtime.routeNotes,
     current: {
+      target: runtime.lastDecision?.model && `${runtime.lastDecision.model.provider}/${runtime.lastDecision.model.id}` === activeKey ? runtime.lastDecision.target : undefined,
       index: tierForModel(activeKey, config),
       model: runtime.models.find((model) => `${model.provider}/${model.id}` === activeKey),
     },
@@ -300,6 +330,7 @@ async function analyse(
 interface ApplyResult {
   action: "switched" | "kept" | "notified" | "skipped" | "rerouted";
   message: string;
+  blocked?: boolean;
 }
 
 /** Defined whenever the tier guard prompted, including acceptance. */
@@ -315,18 +346,6 @@ function decisionModelKey(decision: Decision): string {
   const provider = decision.model ? decision.model.provider : decision.target.provider;
   const model = decision.model ? decision.model.id : decision.target.model;
   return `${provider}/${model}`;
-}
-
-/** The first entry in a chain pi can actually serve, paired with its model. */
-function firstServable(
-  chain: readonly RouteTarget[],
-  models: readonly AvailableModel[],
-): { target: RouteTarget; model: AvailableModel } | undefined {
-  for (const target of chain) {
-    const model = findModel(models, target);
-    if (model) return { target, model };
-  }
-  return undefined;
 }
 
 /**
@@ -366,7 +385,7 @@ async function guardTierSwitch(
   if (choice === "" || choice === "y" || choice === "yes") return { keep: false, rerouted: false };
   if (choice === "0") {
     const servable = runtime.config.free.enabled
-      ? firstServable(runtime.config.free.pool, runtime.models)
+      ? firstAvailable(runtime.models, runtime.config.free.pool, eligibilityFor(runtime), decision.notes)
       : undefined;
     if (!servable) return { keep: true, rerouted: false };
     decision.model = servable.model;
@@ -379,7 +398,7 @@ async function guardTierSwitch(
 
   if (/^[1-5]$/.test(choice)) {
     const tier = TIERS[Number(choice) - 1];
-    const servable = firstServable(runtime.config.routes[tier], runtime.models);
+    const servable = firstAvailable(runtime.models, runtime.config.routes[tier], eligibilityFor(runtime), decision.notes);
     if (servable) {
       decision.model = servable.model;
       decision.target = servable.target;
@@ -411,6 +430,12 @@ async function applyDecision(
     (runtime.config.stickiness && targetKey !== undefined && currentKey === targetKey);
 
   if (keepCurrent) {
+    if (!eligibleTarget(decision.target, decision.model!, eligibilityFor(runtime), decision.notes)) {
+      const blocked = quotaBlocked(ctx, runtime, decision.notes);
+      appendDecisionEntry(analysis, decision, "skipped", runtime);
+      return { action: "skipped", message: "current model is quota-ineligible", blocked };
+    }
+    if (decision.notes.some((note) => note.includes("codex"))) notify(ctx, decision.notes.join("\n"), "warning");
     runtime.appliedTierIndex = decision.tierIndex;
     runtime.lastDecision = decision;
     runtime.lastAnalysis = analysis;
@@ -422,15 +447,17 @@ async function applyDecision(
   if (runtime.config.mode === "notify") {
     notify(ctx, `${headline}\n${detail}`, "info");
     appendDecisionEntry(analysis, decision, "notified", runtime);
-    return { action: "notified", message: `${headline} (notify only)` };
+    return { action: "notified", message: `${headline} (notify only)`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
   }
 
   // An expensive-tier approval gate, independent of `mode`. It runs before the
   // `confirm` select so a guarded tier asks once, not twice.
   const guard = await guardTierSwitch(decision, ctx, runtime, options);
   if (guard?.keep) {
+    const blocked = quotaBlocked(ctx, runtime, decision.notes);
+    if (!blocked && decision.notes.length) notify(ctx, decision.notes.join("\n"), "warning");
     appendDecisionEntry(analysis, decision, "skipped", runtime);
-    return { action: "skipped", message: "kept current model" };
+    return { action: "skipped", message: "kept current model", blocked };
   }
   if (guard?.rerouted) {
     // The target moved after the headline was built, so rebuild it for the notice.
@@ -449,7 +476,7 @@ async function applyDecision(
     // offered only when there is one. It was previously clamped to `quick`, which
     // rendered "Use quick" twice on an already-cheap turn.
     const cheaper = TIERS[decision.tierIndex - 1];
-    const servable = cheaper ? firstServable(runtime.config.routes[cheaper], runtime.models) : undefined;
+    const servable = cheaper ? firstAvailable(runtime.models, runtime.config.routes[cheaper], eligibilityFor(runtime), decision.notes) : undefined;
     const options_ = [`Use ${decision.tier} — ${target}`];
     if (cheaper && servable) {
       options_.push(`Use ${cheaper} — ${servable.target.provider}/${servable.target.model}`);
@@ -457,8 +484,10 @@ async function applyDecision(
     options_.push(`Keep ${currentModelKey(ctx) ?? "current model"}`);
     const choice = await ctx.ui.select(`Jev suggests ${decision.tier}\n${detail}`, options_);
     if (!choice || choice.startsWith("Keep")) {
+      const blocked = quotaBlocked(ctx, runtime, decision.notes);
+      if (!blocked && decision.notes.some((note) => note.includes("codex"))) notify(ctx, decision.notes.join("\n"), "warning");
       appendDecisionEntry(analysis, decision, "skipped", runtime);
-      return { action: "skipped", message: "kept current model" };
+      return { action: "skipped", message: "kept current model", blocked };
     }
     if (cheaper && servable && choice.startsWith(`Use ${cheaper}`)) {
       decision.model = servable.model;
@@ -474,14 +503,24 @@ async function applyDecision(
       : undefined;
   if (!model) {
     appendDecisionEntry(analysis, decision, "skipped", runtime);
-    return { action: "skipped", message: `${headline} — model not available in this build` };
+    return { action: "skipped", message: `${headline} — model not available in this build`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
   }
 
+  if (!eligibleTarget(decision.target, model, eligibilityFor(runtime), decision.notes)) {
+    const blocked = quotaBlocked(ctx, runtime, decision.notes);
+    notify(ctx, `jev-router: selected model is quota-ineligible\n${decision.notes.join("\n")}`, "warning");
+    appendDecisionEntry(analysis, decision, "skipped", runtime);
+    return { action: "skipped", message: "selected model is quota-ineligible", blocked };
+  }
+
+  // Selection (including overrides) may have changed the target or added quota notes.
+  headline = `Jev → ${decision.tier} (${decisionModelKey(decision)})`;
+  detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
   const previous = currentModelKey(ctx);
   const ok = await switchModel(model);
   if (!ok) {
     appendDecisionEntry(analysis, decision, "skipped", runtime);
-    return { action: "skipped", message: `${headline} — no auth configured for provider` };
+    return { action: "skipped", message: `${headline} — no auth configured for provider`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
   }
 
   if (previous && previous !== `${model.provider}/${model.id}`) runtime.previousModelKey = previous;
@@ -542,6 +581,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     config: loadConfig(),
     ledger: loadLedger(loadConfig().stateFile),
     models: [],
+    routeNotes: [],
   };
 
   // Not every pi build/fork exposes the full ExtensionAPI surface. Detect the
@@ -568,7 +608,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
         box.addChild(new Text(label, 0, 0));
         if (data.skipReason) {
           box.addChild(new Text(theme.fg("dim", `${data.reason}`), 0, 0));
-          box.addChild(new Text(theme.fg("dim", `using ${data.model}`), 0, 0));
+          box.addChild(new Text(theme.fg("dim", data.blocked ? "prompt not sent" : `using ${data.model}`), 0, 0));
           return box;
         }
         box.addChild(new Text(theme.fg("dim", data.reason), 0, 0));
@@ -602,6 +642,13 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.config = loadConfig(ctx.cwd);
     runtime.ledger = loadLedger(runtime.config.stateFile);
     runtime.models = toAvailable(ctx);
+    runtime.quota?.stop();
+    runtime.quota = undefined;
+    const quotaConfig = runtime.config.quota["openai-codex"];
+    if (quotaConfig?.enabled) {
+      runtime.quota = new CodexQuotaCache(quotaConfig, async () => ctx.modelRegistry?.getApiKeyForProvider?.("openai-codex"));
+      runtime.quota.start();
+    }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
     if (runtime.config.enabled && !hasApiKey(runtime.config)) {
@@ -623,6 +670,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
   });
 
   pi.on("session_shutdown", async () => {
+    runtime.quota?.stop();
     saveLedger(runtime.config.stateFile, runtime.ledger);
   });
 
@@ -653,14 +701,23 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
   pi.on("input", async (event, ctx) => {
     if (!runtime.config.enabled) return { action: "continue" };
     if (event.source === "extension") return { action: "continue" };
-    if (event.images?.length && !event.text?.trim()) return { action: "continue" };
+    if (event.images?.length && !event.text?.trim()) {
+      const notes: string[] = [];
+      const blocked = quotaBlocked(ctx, runtime, notes);
+      if (!blocked && notes.length) notify(ctx, notes.join("\n"), "warning");
+      return { action: blocked ? "handled" : "continue" };
+    }
 
     const text = event.text ?? "";
     const hasHistory = (historyExcerpt(ctx, 1)?.length ?? 0) > 0;
     const skip = shouldSkip(text, runtime.config, hasHistory);
     if (skip) {
-      appendSkipEntry(skip, ctx, runtime);
-      return { action: "continue" };
+      const notes: string[] = [];
+      if (skip === "empty" || skip === "slash command" || currentQuotaAllowed(ctx, runtime, notes)) {
+        if (notes.length) notify(ctx, notes.join("\n"), "warning");
+        appendSkipEntry(skip, ctx, runtime);
+        return { action: "continue" };
+      }
     }
 
     runtime.lastPrompt = text.trim();
@@ -670,20 +727,24 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       if ("error" in result) {
         statusLine(ctx, runtime);
         notify(ctx, `jev-router: ${result.error}`, "warning");
-        return { action: "continue" };
+        return { action: quotaBlocked(ctx, runtime, runtime.routeNotes) ? "handled" : "continue" };
       }
       const { analysis, decision } = result;
       runtime.lastAnalysis = analysis;
       if (!decision) {
-        appendSkipEntry("no route available", ctx, runtime);
+        const blocked = quotaBlocked(ctx, runtime, runtime.routeNotes);
+        appendSkipEntry("no route available", ctx, runtime, blocked);
+        if (runtime.routeNotes.length) notify(ctx, `jev-router: no eligible route\n${runtime.routeNotes.join("\n")}`, "warning");
         statusLine(ctx, runtime);
-        return { action: "continue" };
+        return { action: blocked ? "handled" : "continue" };
       }
-      await applyDecision(analysis, decision, ctx, runtime);
+      const applied = await applyDecision(analysis, decision, ctx, runtime);
+      if (applied.blocked) return { action: "handled" };
     } catch (error) {
       statusLine(ctx, runtime);
       const message = error instanceof JevError ? error.message : error instanceof Error ? error.message : String(error);
       if (!/abort/i.test(message)) notify(ctx, `jev-router: ${message}`, "warning");
+      if (quotaBlocked(ctx, runtime, runtime.routeNotes)) return { action: "handled" };
     }
     return { action: "continue" };
   });
@@ -745,6 +806,11 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             notify(ctx, `previous model not found: ${runtime.previousModelKey}`, "warning");
             return;
           }
+          const notes: string[] = [];
+          if (!eligibleTarget(targetForModel(runtime.config, model), model, eligibilityFor(runtime), notes)) {
+            notify(ctx, `cannot revert: model is quota-ineligible\n${notes.join("\n")}`, "warning");
+            return;
+          }
           await switchModel(model);
           notify(ctx, `reverted to ${runtime.previousModelKey}`, "info");
           return;
@@ -765,7 +831,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
               formatAnalysis(analysis),
               "",
               decision ? describeDecision(decision) : "no route available",
-              decision?.notes.length ? decision.notes.join("\n") : "",
+              runtime.routeNotes.length ? runtime.routeNotes.join("\n") : "",
             ]
               .filter(Boolean)
               .join("\n"),
@@ -841,7 +907,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             ...TIERS.map((tier) => {
               const route = runtime.config.routes[tier];
               if (route.length === 0) return tier === "xpremium" ? `    ${tier.padEnd(9)} (off)` : `  ✗ ${tier.padEnd(9)} (none configured)`;
-              const pick = firstAvailable(runtime.models, route);
+              const pick = firstAvailable(runtime.models, route, eligibilityFor(runtime));
               const marker = pick ? "✓" : "✗";
               const label = pick ? `${pick.model.provider}/${pick.model.id}` : `${route[0]?.provider}/${route[0]?.model}`;
               const alts = route.length > 1 ? ` (+${route.length - 1} fallback${route.length > 2 ? "s" : ""})` : "";
@@ -850,8 +916,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             "",
             `kind specialists (${Object.keys(runtime.config.kindModels).length}):`,
             ...Object.entries(runtime.config.kindModels).map(([kind, chain]) => {
-              const ok = firstAvailable(runtime.models, chain) !== undefined;
-              return `  ${ok ? "✓" : "✗"} ${kind.padEnd(10)} ${describeKindRoutes(runtime.config, runtime.models, kind)}`;
+              const ok = firstAvailable(runtime.models, chain, eligibilityFor(runtime)) !== undefined;
+              return `  ${ok ? "✓" : "✗"} ${kind.padEnd(10)} ${describeKindRoutes(runtime.config, runtime.models, kind, eligibilityFor(runtime))}`;
             }),
             runtime.config.free.enabled
               ? `  free pool (${runtime.config.free.policy}, ${runtime.config.free.pool.length} configured) is tried ${runtime.config.free.policy === "prefer" ? "before these" : "after every tier"}`
@@ -883,7 +949,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       }
       const { analysis, decision } = result;
       notify(ctx, 
-        [formatAnalysis(analysis), "", decision ? describeDecision(decision) : "no route available"].join("\n"),
+        [formatAnalysis(analysis), "", decision ? describeDecision(decision) : "no route available", ...runtime.routeNotes].join("\n"),
         "info",
       );
     },
@@ -908,13 +974,13 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
         formatAnalysis(analysis),
         "",
         decision ? describeDecision(decision) : "no route available",
-        decision?.notes.length ? `notes: ${decision.notes.join("; ")}` : "",
+        runtime.routeNotes.length ? `notes: ${runtime.routeNotes.join("; ")}` : "",
       ]
         .filter(Boolean)
         .join("\n");
       return {
         content: [{ type: "text", text }],
-        details: { analysis, decision },
+        details: { analysis, decision, notes: [...runtime.routeNotes] },
       };
     },
   });

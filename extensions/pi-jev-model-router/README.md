@@ -19,7 +19,7 @@ you type a prompt
    code composes the decision
      demand = 0.55·complexity + 0.45·capability (+ reasoning nudge)
      demand = max(demand, kind floor)          # planning/review never go cheap
-     confidence guard → budget guard → availability guard → cache guard
+     confidence guard → budget guard → availability/quota guard → cache guard
         │
         ▼
    pi.setModel(node) + pi.setThinkingLevel(node)  → the turn runs on that model
@@ -28,6 +28,9 @@ you type a prompt
 The split is deliberate: **Jev judges the task, code owns the budget.** Changing
 your spend caps never invalidates the judgment, and the judgment stays a pure
 semantic read of the request.
+
+See the [root README](../../README.md) for the full configuration reference,
+ranking, expensive-tier confirmations, and Codex quota guards.
 
 ## What you see
 
@@ -87,7 +90,8 @@ export TYPESAFE_API_KEY=...
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
 | `/jev-router budget monthly 150` | Session-only monthly cap |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
-| `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
+| `/jev-router revert` | Switch back to the previous model if quota eligibility allows it |
+| `/jev-router suggest [--write]` | Propose routes from local scores; optionally save the generated config layer |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
 
 The LLM can also call the `jev_route` tool to ask for a tier recommendation for
@@ -97,8 +101,10 @@ a subtask.
 
 Optional. Create `~/.pi/agent/pi-jev-model-router.json`
 (see `pi-jev-model-router.example.json`), or `<project>/.pi/pi-jev-model-router.json` for
-project-specific routes. Later sources win: defaults → global → project → env
-(`JEV_ROUTER_MODE`, `JEV_ROUTER_OFF=1`).
+project-specific routes. Later sources win: defaults → generated routes/kinds →
+global → project → env (`JEV_ROUTER_MODE`, `JEV_ROUTER_OFF=1`). The generated layer
+is `~/.pi/agent/pi-jev-model-router.generated.json`, written by
+`/jev-router suggest --write`; hand-edited config takes precedence.
 
 ```json
 {
@@ -127,7 +133,7 @@ project-specific routes. Later sources win: defaults → global → project → 
 
 ### Two axes of routing
 
-1. **Tier** (`quick` → `standard` → `high` → `premium`, plus opt-in `xpremium`) is the *budget axis*. Each
+1. **Tier** (`quick` → `standard` → `high` → `premium`, plus opt-in `xpremium`) is the *capability axis*. Each
    tier is an ordered **candidate chain**; the first model that is available and
    authenticated wins, so you get automatic fallback when a model is down or
    your key can't afford it.
@@ -181,6 +187,16 @@ tier is above `standard`, routing falls back to `standard` rather than spending
 premium money on a guess. Low confidence on a harmless preference is not treated
 as an error.
 
+### Codex quota protection
+
+Opt in with `quota.openai-codex` and set provider-wide or per-target `minQuota`
+floors for remaining `fiveHour` and `weekly` account quota. The stricter floor
+wins. Quota readings refresh in the background using Pi's credentials, not on
+each turn. Missing or stale readings use `onUnknown` (`use` by default, or
+`skip`). Cache retention and confirmation overrides cannot bypass the guard.
+See [Codex quota guards](../../README.md#codex-quota-guards) for configuration,
+reset handling, submission protection, and limitations.
+
 ## Tuning notes
 
 - `useDefaultModels: false` drops the built-in `routes`/`kindModels` entirely, so
@@ -197,8 +213,9 @@ as an error.
   `✓`/`✗` based on what is actually available and authenticated.
 - `minPromptChars` (default 12) governs when a short message counts as a
   continuation and is left alone; a short first message in a fresh session is
-  still routed. `/` commands, `yes`/`continue` acknowledgements, and `!` bash
-  lines are never routed.
+  still routed. Acknowledgements normally stay put, but route when quota
+  protection rejects the current model. `/` commands and extension-generated
+  messages bypass routing.
 
 ## Files
 
@@ -209,12 +226,16 @@ as an error.
 | `jev.ts` | TypeSafe HTTP client, question definitions, response parsing |
 | `router.ts` | composition (`decide`), tier/kind chains, availability fallback |
 | `budget.ts` | spend ledger, caps, pressure |
+| `ranking.ts` | local scores, route suggestions, provider spread |
+| `quota.ts` | Codex account quota, eligibility, background cache |
 
 ## Failure behaviour
 
-Routing never blocks your turn. A missing key, network error, timeout (default
-3.5 s, retried on 429/529), or unknown model means: warn in the status line and
-run the prompt on the current model unchanged.
+By default, a missing key, network error, timeout (default 3.5 s, retried on
+429/529), or unknown model warns and runs the prompt on the current model.
+Opt-in quota protection is the exception: if the current model is ineligible
+and routing cannot safely switch, submission is blocked with an explicit
+**prompt not sent** notice. Blocked prompts are not automatically queued.
 
 ## Compatibility
 
