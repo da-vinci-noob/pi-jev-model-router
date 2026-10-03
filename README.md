@@ -538,6 +538,53 @@ Otherwise the `xpremium` chain is never tried, not even as a fallback when
 `premium` is unavailable. `kindMinimumTier: "xpremium"` is treated as `premium`.
 A kind specialist with `minTier: "xpremium"` only serves promoted turns.
 
+## Confirming an expensive switch
+
+Jev occasionally reads a medium turn as `premium` or `xpremium`. `confirm.tiers`
+makes those switches ask first, so one wrong judgment does not silently spend
+an expensive model:
+
+```json
+{
+  "confirm": {
+    "tiers": ["premium", "xpremium"],
+    "timeoutMs": 10000,
+    "onTimeout": "accept"
+  }
+}
+```
+
+`tiers` defaults to `["xpremium"]`, which is inert until you give
+`routes.xpremium` a chain, so nothing changes for a config that never enables
+that tier. Add `"premium"` if that is where you want a hand on the switch. Any
+other tier switches without asking.
+
+When the gate opens, the answer accepts a tier directly:
+
+| Answer | Effect |
+| --- | --- |
+| `Y` or Enter | switch to the suggested tier |
+| `N` | keep the current model |
+| `0` | force the free pool, keeping the current model when the pool is disabled or empty |
+| `1` to `5` | jump to `quick`, `standard`, `high`, `premium`, `xpremium` |
+
+The digits map onto `TIERS` in order, so `1` is `quick` and `5` is `xpremium`.
+Anything unrecognised keeps the current model, so a mistyped key never spends an
+expensive model.
+
+`timeoutMs` is passed to the dialog, which shows a countdown and dismisses
+itself. `0` waits for an answer instead. On a dismiss or a timeout the router
+applies `onTimeout`: `accept` switches anyway, `reject` keeps the current model.
+The default `accept` means a turn is never lost to a dialog the user did not
+see.
+
+This is independent of `mode`. `confirm` mode asks about every switch, the gate
+asks only about the tiers you list, and `notify` never asks because it never
+switches. A guarded tier asks once, not once per layer.
+
+A tier jump records a `rerouted` decision, so `/jev-router why` shows the tier
+Jev judged alongside the model that actually served the turn.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -602,6 +649,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `taskKinds` | the 10 kinds above | Kind labels and descriptions Jev chooses from; merged over the built-ins |
 | `ranking` | cut-offs `0.5 / 0.7 / 0.85`, `spreadProviders: true` | Scores file and cut-offs for `/jev-router suggest` |
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
+| `confirm` | `tiers: ["xpremium"]`, `timeoutMs: 10000`, `onTimeout: "accept"` | Ask before switching into these tiers; `0` forces the free pool, `1` to `5` jump to a tier |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
@@ -712,6 +760,7 @@ of failing installation:
 | `appendEntry` | Decisions are not persisted as session entries |
 | `ctx.ui.notify` / `ctx.ui.setStatus` | Silently skipped |
 | `ctx.ui.select` | `confirm` mode falls back to auto-switching |
+| `ctx.ui.input` | The `confirm.tiers` gate falls back to auto-switching |
 | `ctx.modelRegistry.find` / `getAvailable` | Reports "model not available in this build" and leaves the current model in place |
 | `registerCommand` / `registerTool` | Commands and the tool are not registered; event-driven routing still works |
 

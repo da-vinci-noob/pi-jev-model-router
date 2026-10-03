@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import {
   formatUsd,
@@ -55,7 +55,7 @@ const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it
 
 /** Data rendered in the transcript for every routing decision (never sent to the LLM). */
 interface DecisionEntry {
-  action: "switched" | "kept" | "notified" | "skipped";
+  action: "switched" | "kept" | "notified" | "skipped" | "rerouted";
   tier: string;
   model: string;
   kind: string;
@@ -298,8 +298,98 @@ async function analyse(
 }
 
 interface ApplyResult {
-  action: "switched" | "kept" | "notified" | "skipped";
+  action: "switched" | "kept" | "notified" | "skipped" | "rerouted";
   message: string;
+}
+
+interface GuardOutcome {
+  /** The user declined, or the timeout policy rejected. The switch is abandoned. */
+  keep: boolean;
+  /** The user picked a different tier, so `decision` was rewritten in place. */
+  rerouted: boolean;
+}
+
+/** The model a decision currently points at, as `provider/model`. */
+function decisionModelKey(decision: Decision): string {
+  const provider = decision.model ? decision.model.provider : decision.target.provider;
+  const model = decision.model ? decision.model.id : decision.target.model;
+  return `${provider}/${model}`;
+}
+
+/** The first entry in a chain pi can actually serve, paired with its model. */
+function firstServable(
+  chain: readonly RouteTarget[],
+  models: readonly AvailableModel[],
+): { target: RouteTarget; model: AvailableModel } | undefined {
+  for (const target of chain) {
+    const model = findModel(models, target);
+    if (model) return { target, model };
+  }
+  return undefined;
+}
+
+/**
+ * Ask before switching into a tier listed in `confirm.tiers`.
+ *
+ * `Y` or Enter accepts, `N` keeps the current model, `0` forces the free pool,
+ * and `1` to `5` jump straight to a tier (`TIERS[0]` is `1`). Anything else is
+ * treated as a decline, so a mistyped key never spends an expensive model.
+ *
+ * A reroute rewrites `decision` and returns so the common switch path below
+ * stays the only place that switches models.
+ */
+async function guardTierSwitch(
+  decision: Decision,
+  ctx: ExtensionContext,
+  runtime: Runtime,
+  options: { allowPrompt?: boolean },
+): Promise<GuardOutcome | undefined> {
+  const { confirm } = runtime.config;
+  if (options.allowPrompt === false) return undefined;
+  if (!confirm.tiers.includes(decision.tier)) return undefined;
+  if (typeof ctx.ui?.input !== "function") return undefined;
+
+  const ladder = TIERS.map((tier, index) => `${index + 1} ${tier}`).join("   ");
+  const answer = await ctx.ui.input(
+    `Jev → ${decision.tier} (${decisionModelKey(decision)})\n${decision.reason}`,
+    `Y/Enter switch · N keep · 0 free · ${ladder}`,
+    confirm.timeoutMs > 0 ? { timeout: confirm.timeoutMs } : undefined,
+  );
+
+  // `undefined` is a dismiss or a timeout; an empty string is Enter, which accepts.
+  if (answer === undefined) {
+    if (confirm.onTimeout === "reject") return { keep: true, rerouted: false };
+    return undefined;
+  }
+
+  const choice = answer.trim().toLowerCase();
+  if (choice === "" || choice === "y" || choice === "yes") return undefined;
+  if (choice === "0") {
+    const servable = runtime.config.free.enabled
+      ? firstServable(runtime.config.free.pool, runtime.models)
+      : undefined;
+    if (!servable) return { keep: true, rerouted: false };
+    decision.model = servable.model;
+    decision.target = servable.target;
+    // The pool sits below `TIERS`, so record it at the cheapest rung.
+    decision.tierIndex = 0;
+    decision.notes.push("user forced the free pool");
+    return { keep: false, rerouted: true };
+  }
+
+  if (/^[1-5]$/.test(choice)) {
+    const tier = TIERS[Number(choice) - 1];
+    const servable = firstServable(runtime.config.routes[tier], runtime.models);
+    if (servable) {
+      decision.model = servable.model;
+      decision.target = servable.target;
+      decision.tier = tier;
+      decision.tierIndex = tierIndex(tier);
+      decision.notes.push(`user forced tier ${tier}`);
+      return { keep: false, rerouted: true };
+    }
+  }
+  return { keep: true, rerouted: false };
 }
 
 async function applyDecision(
@@ -312,8 +402,8 @@ async function applyDecision(
   const target = decision.model
     ? `${decision.model.provider}/${decision.model.id}`
     : `${decision.target.provider}/${decision.target.model}`;
-  const headline = `Jev → ${decision.tier} (${target})`;
-  const detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
+  let headline = `Jev → ${decision.tier} (${target})`;
+  let detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
   const currentKey = currentModelKey(ctx);
   const targetKey = decision.model ? `${decision.model.provider}/${decision.model.id}` : undefined;
   const keepCurrent =
@@ -335,32 +425,45 @@ async function applyDecision(
     return { action: "notified", message: `${headline} (notify only)` };
   }
 
+  // An expensive-tier approval gate, independent of `mode`. It runs before the
+  // `confirm` select so a guarded tier asks once, not twice.
+  const guard = await guardTierSwitch(decision, ctx, runtime, options);
+  if (guard?.keep) {
+    appendDecisionEntry(analysis, decision, "skipped", runtime);
+    return { action: "skipped", message: "kept current model" };
+  }
+  if (guard?.rerouted) {
+    // The target moved after the headline was built, so rebuild it for the notice.
+    headline = `Jev → ${decision.tier} (${decisionModelKey(decision)})`;
+    detail = `${decision.reason}${decision.notes.length ? ` · ${decision.notes.join(" · ")}` : ""}`;
+  }
+
   // Confirm mode needs a working select prompt; otherwise fall through to auto-switch.
   if (
     runtime.config.mode === "confirm" &&
     options.allowPrompt !== false &&
     typeof ctx.ui?.select === "function"
   ) {
-    const cheaper = TIERS[Math.max(0, decision.tierIndex - 1)];
-    const cheaperTarget = runtime.config.routes[cheaper][0];
-    const options_ = [
-      `Use ${decision.tier} — ${target}`,
-      `Use ${cheaper} — ${cheaperTarget.provider}/${cheaperTarget.model}`,
-      `Keep ${currentModelKey(ctx) ?? "current model"}`,
-    ];
+    // `TIERS[decision.tierIndex - 1]` is undefined at `quick`, so the cheaper rung is
+    // offered only when there is one. It was previously clamped to `quick`, which
+    // rendered "Use quick" twice on an already-cheap turn.
+    const cheaper = TIERS[decision.tierIndex - 1];
+    const servable = cheaper ? firstServable(runtime.config.routes[cheaper], runtime.models) : undefined;
+    const options_ = [`Use ${decision.tier} — ${target}`];
+    if (cheaper && servable) {
+      options_.push(`Use ${cheaper} — ${servable.target.provider}/${servable.target.model}`);
+    }
+    options_.push(`Keep ${currentModelKey(ctx) ?? "current model"}`);
     const choice = await ctx.ui.select(`Jev suggests ${decision.tier}\n${detail}`, options_);
     if (!choice || choice.startsWith("Keep")) {
       appendDecisionEntry(analysis, decision, "skipped", runtime);
       return { action: "skipped", message: "kept current model" };
     }
-    if (choice.startsWith(`Use ${cheaper}`)) {
-      const cheaperModel = findModel(runtime.models, cheaperTarget);
-      if (cheaperModel) {
-        decision.model = cheaperModel;
-        decision.target = cheaperTarget;
-        decision.tier = cheaper;
-        decision.tierIndex = tierIndex(cheaper);
-      }
+    if (cheaper && servable && choice.startsWith(`Use ${cheaper}`)) {
+      decision.model = servable.model;
+      decision.target = servable.target;
+      decision.tier = cheaper;
+      decision.tierIndex = tierIndex(cheaper);
     }
   }
 
@@ -390,8 +493,8 @@ async function applyDecision(
   runtime.lastAnalysis = analysis;
   statusLine(ctx, runtime);
   notify(ctx, `${headline}\n${detail}`, "info");
-  appendDecisionEntry(analysis, decision, "switched", runtime);
-  return { action: "switched", message: `${headline}` };
+  appendDecisionEntry(analysis, decision, guard?.rerouted ? "rerouted" : "switched", runtime);
+  return { action: guard?.rerouted ? "rerouted" : "switched", message: `${headline}` };
 }
 
 // The ExtensionAPI instance for the running session, captured at load time.

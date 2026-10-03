@@ -16,7 +16,7 @@ const scoresFile = join(agentDir, "pi-jev-model-router.scores.json");
 const generatedFile = join(agentDir, "pi-jev-model-router.generated.json");
 
 const cost = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 };
-const models = ["quick-a", "std-a", "high-a", "prem-a"].map((id) => ({ provider: "testprov", id, cost }));
+const models = ["quick-a", "std-a", "high-a", "prem-a", "xprem-a"].map((id) => ({ provider: "testprov", id, cost }));
 const realFetch = globalThis.fetch;
 const savedKey = process.env.TYPESAFE_API_KEY;
 let cwd: string;
@@ -60,11 +60,14 @@ function stubFetch(respond: () => Response): void {
   }) as typeof fetch;
 }
 
-async function load(options: { minimal?: boolean } = {}) {
+async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string } } = {}) {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
   const setModel: unknown[] = [];
   const thinking: unknown[] = [];
+  const dialogs: Array<{ title: string; placeholder?: string; opts?: unknown; options?: string[] }> = [];
+  let answer = options.answer;
+  const selectAnswer = options.select;
   const fake: Record<string, unknown> = { on: (event: string, handler: Handler) => handlers.set(event, handler) };
   if (!options.minimal) {
     Object.assign(fake, {
@@ -80,19 +83,30 @@ async function load(options: { minimal?: boolean } = {}) {
   const notes: Array<[string, string]> = [];
   const ctx = {
     cwd,
-    model: models[0],
+    model: options.current ?? models[0],
     modelRegistry: {
       getAvailable: () => models,
       find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
     },
-    ui: { notify: (text: string, level: string) => notes.push([text, level]), setStatus: () => {} },
+    ui: {
+      notify: (text: string, level: string) => notes.push([text, level]),
+      setStatus: () => {},
+      select: async (title: string, options: string[]) => {
+        dialogs.push({ title, options });
+        return selectAnswer;
+      },
+      input: async (title: string, placeholder?: string, opts?: unknown) => {
+        dialogs.push({ title, placeholder, opts });
+        return answer;
+      },
+    },
     sessionManager: { buildContextEntries: () => [] },
     getContextUsage: () => ({ tokens: 0 }),
   };
   await handlers.get("session_start")!({}, ctx);
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
   const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
-  return { input, command, notes, setModel, thinking };
+  return { input, command, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
 }
 
 beforeEach(() => {
@@ -172,6 +186,185 @@ describe("pi extension", () => {
     const { notes } = await load();
 
     expect(notes.filter(([text]) => text.includes("no models are configured"))).toEqual([]);
+  });
+
+  describe("confirm mode", () => {
+    test("offers the cheaper rung only when there is one", async () => {
+      writeProjectConfig({
+        apiKey: "test-key",
+        mode: "confirm",
+        routes: {
+          quick: [{ provider: "testprov", model: "quick-a" }],
+          standard: [{ provider: "testprov", model: "std-a" }],
+          high: [{ provider: "testprov", model: "high-a" }],
+          premium: [{ provider: "testprov", model: "prem-a" }],
+          xpremium: [],
+        },
+      });
+      stubFetch(() => Response.json(jevAnswers("implement", 3)));
+      const { input, dialogs, setModel } = await load({ select: "Use high — testprov/high-a" });
+
+      // Premium demand lands on premium, whose cheaper rung is high.
+      await input("plan a migration for the upload client");
+      expect(dialogs[0].options).toEqual([
+        "Use premium — testprov/prem-a",
+        "Use high — testprov/high-a",
+        "Keep testprov/quick-a",
+      ]);
+      expect(setModel).toEqual([models[2]]);
+    });
+
+    test("never lists the same tier twice on a quick turn", async () => {
+      writeProjectConfig({ apiKey: "test-key", mode: "confirm" });
+      // score 0 lands below standard, so the decision is quick itself. The
+      // current model is moved off the quick pick so confirm actually opens.
+      stubFetch(() => Response.json(jevAnswers("chat", 0)));
+      const { input, dialogs, setModel } = await load({
+        select: "Keep testprov/std-a",
+        current: { provider: "testprov", id: "std-a" },
+      });
+
+      await input("what does this error mean in general terms");
+      // Two entries, not three: the old clamp repeated "Use quick".
+      expect(dialogs[0].options).toEqual(["Use quick — testprov/quick-a", "Keep testprov/std-a"]);
+      expect(setModel).toEqual([]);
+    });
+  });
+
+  describe("confirm.tiers gate", () => {
+    const writeGuarded = (patch: Record<string, unknown> = {}) =>
+      writeProjectConfig({
+        apiKey: "test-key",
+        routes: {
+          quick: [{ provider: "testprov", model: "quick-a" }],
+          standard: [{ provider: "testprov", model: "std-a" }],
+          high: [{ provider: "testprov", model: "high-a" }],
+          premium: [{ provider: "testprov", model: "prem-a" }],
+          xpremium: [{ provider: "testprov", model: "xprem-a" }],
+        },
+        free: { enabled: true, policy: "fallback-only", pool: [{ provider: "testprov", model: "quick-a" }] },
+        confirm: { tiers: ["premium", "xpremium"], timeoutMs: 10000, onTimeout: "accept" },
+        ...patch,
+      });
+
+    beforeEach(() => writeGuarded());
+    // score 3 on the 0..3 rubric makes demand round to premium, so xpremium is eligible.
+    const expensive = () => stubFetch(() => Response.json(jevAnswers("implement", 3)));
+
+    test("asks before an expensive tier and Enter accepts", async () => {
+      expensive();
+      const { input, setModel, dialogs } = await load({ answer: "" });
+
+      await input("plan a migration for the upload client");
+      expect(dialogs).toHaveLength(1);
+      expect(dialogs[0].title).toContain("xprem-a");
+      expect(dialogs[0].placeholder).toContain("0 free");
+      expect(dialogs[0].placeholder).toContain("1 quick");
+      expect(dialogs[0].opts).toEqual({ timeout: 10000 });
+      expect(setModel).toEqual([models[4]]);
+    });
+
+    test("N keeps the current model", async () => {
+      expensive();
+      const { input, setModel } = await load({ answer: "n" });
+
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([]);
+    });
+
+    test("0 forces the free pool instead of the expensive model", async () => {
+      expensive();
+      const { input, setModel } = await load({ answer: "0" });
+
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([models[0]]);
+    });
+
+    test("0 keeps the current model when the free pool is disabled", async () => {
+      writeGuarded({ free: { enabled: false, policy: "fallback-only", pool: [] } });
+      expensive();
+      const { input, setModel } = await load({ answer: "0" });
+
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([]);
+    });
+
+    test("a digit jumps straight to that tier", async () => {
+      expensive();
+      const { input, setModel, notes } = await load({ answer: "3" });
+
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([models[2]]);
+      expect(notes.some(([text]) => text.includes("user forced tier high"))).toBe(true);
+    });
+
+    test("an unrecognised answer keeps the current model", async () => {
+      expensive();
+      const { input, setModel } = await load({ answer: "maybe" });
+
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([]);
+    });
+
+    test("no answer resolves through onTimeout", async () => {
+      writeGuarded({ confirm: { tiers: ["xpremium"], timeoutMs: 10000, onTimeout: "accept" } });
+      expensive();
+      const accepted = await load({ answer: undefined });
+      await accepted.input("plan a migration for the upload client");
+      expect(accepted.setModel).toEqual([models[4]]);
+
+      writeGuarded({ confirm: { tiers: ["xpremium"], timeoutMs: 10000, onTimeout: "reject" } });
+      const rejected = await load({ answer: undefined });
+      await rejected.input("plan a migration for the upload client");
+      expect(rejected.setModel).toEqual([]);
+    });
+
+    test("timeoutMs 0 omits the dialog timeout", async () => {
+      writeGuarded({ confirm: { tiers: ["xpremium"], timeoutMs: 0, onTimeout: "accept" } });
+      expensive();
+      const { input, dialogs } = await load({ answer: "y" });
+
+      await input("plan a migration for the upload client");
+      expect(dialogs[0].opts).toBeUndefined();
+    });
+
+    test("does not ask for a tier that is not guarded", async () => {
+      writeGuarded({ confirm: { tiers: ["xpremium"], timeoutMs: 10000, onTimeout: "accept" } });
+      stubFetch(() => Response.json(jevAnswers("implement", 1)));
+      const { input, dialogs, setModel } = await load({ answer: "n" });
+
+      await input("add a retry to the upload client");
+      expect(dialogs).toEqual([]);
+      expect(setModel).toEqual([models[1]]);
+    });
+
+    test("notify mode never opens the gate", async () => {
+      writeGuarded({ mode: "notify" });
+      expensive();
+      const { input, dialogs, setModel } = await load({ answer: "" });
+
+      await input("plan a migration for the upload client");
+      expect(dialogs).toEqual([]);
+      expect(setModel).toEqual([]);
+    });
+
+    test("the default config guards xpremium and nothing else", async () => {
+      writeFileSync(
+        join(cwd, ".pi", "pi-jev-model-router.json"),
+        JSON.stringify({
+          useDefaultModels: false,
+          apiKey: "test-key",
+          stateFile: join(cwd, "state.json"),
+          cache: { aware: false },
+          routes: { premium: [{ provider: "testprov", model: "prem-a" }] },
+        }),
+      );
+      stubFetch(() => Response.json(jevAnswers("implement", 3)));
+      const { input, dialogs } = await load({ answer: "y" });
+
+      await input("plan a migration for the upload client");
+      expect(dialogs).toEqual([]);
+    });
   });
 
   describe("/jev-router suggest", () => {

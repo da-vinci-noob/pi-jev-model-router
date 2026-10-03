@@ -33,6 +33,20 @@ export interface RouteTarget {
   priority?: number;
 }
 
+/** Approval guard for switches into an expensive tier. */
+export interface ConfirmConfig {
+  /**
+   * Tiers that ask before switching. Any other tier switches without asking.
+   * Defaults to `["xpremium"]`, which is inert until `routes.xpremium` is
+   * non-empty, so nothing changes for a config that never enables the tier.
+   */
+  tiers: Tier[];
+  /** Dialog timeout in ms. `0` waits for an answer. */
+  timeoutMs: number;
+  /** What to do when the dialog times out or is dismissed without an answer. */
+  onTimeout: "accept" | "reject";
+}
+
 /** A tier maps to an ordered candidate chain; the first available model wins. */
 export type RouteChain = RouteTarget[];
 
@@ -143,6 +157,7 @@ export interface JevRouterConfig {
   cache: CacheConfig;
   taskKinds: Record<string, string>;
   ranking: RankingConfig;
+  confirm: ConfirmConfig;
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -290,6 +305,11 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     cutoffs: { standard: 0.5, high: 0.7, premium: 0.85 },
     spreadProviders: true,
   },
+  confirm: {
+    tiers: ["xpremium"],
+    timeoutMs: 10000,
+    onTimeout: "accept",
+  },
 };
 
 function readJson(path: string): unknown | undefined {
@@ -364,6 +384,23 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     spreadProviders:
       typeof rankingPatch.spreadProviders === "boolean" ? rankingPatch.spreadProviders : base.ranking.spreadProviders,
   };
+  const confirmPatch = asRecord(p.confirm);
+  const confirmTiers = Array.isArray(confirmPatch.tiers)
+    ? confirmPatch.tiers.filter((tier): tier is Tier => typeof tier === "string" && (TIERS as readonly string[]).includes(tier))
+    : base.confirm.tiers;
+  const confirm: ConfirmConfig = {
+    tiers: confirmTiers,
+    timeoutMs:
+      typeof confirmPatch.timeoutMs === "number" &&
+      Number.isFinite(confirmPatch.timeoutMs) &&
+      confirmPatch.timeoutMs >= 0
+        ? confirmPatch.timeoutMs
+        : base.confirm.timeoutMs,
+    onTimeout:
+      confirmPatch.onTimeout === "accept" || confirmPatch.onTimeout === "reject"
+        ? confirmPatch.onTimeout
+        : base.confirm.onTimeout,
+  };
   return {
     ...base,
     ...(p as Partial<JevRouterConfig>),
@@ -372,6 +409,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     taskKinds,
     free,
     ranking,
+    confirm,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {
