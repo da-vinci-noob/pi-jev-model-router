@@ -71,7 +71,7 @@ pi install npm:pi-jev-model-router
 From a pinned git ref:
 
 ```bash
-pi install git:github.com/da-vinci-noob/pi-jev-model-router@v0.7.0
+pi install git:github.com/da-vinci-noob/pi-jev-model-router@v0.8.0
 ```
 
 From a local checkout:
