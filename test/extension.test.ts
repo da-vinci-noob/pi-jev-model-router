@@ -511,6 +511,23 @@ describe("pi extension", () => {
       expect(setModel).toEqual([codexModels[0]]);
       expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
     });
+    test("revert cannot switch back to a quota-rejected previous model", async () => {
+      setup();
+      const { input, setModel, command, notes } = await loadCodex({ current: codexModels[0] });
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([codexModels[1]]);
+      await command("jev-router", "revert");
+      expect(setModel).toEqual([codexModels[1]]);
+      expect(notes.at(-1)?.[0]).toContain("cannot revert: model is quota-ineligible");
+    });
+    test("startup unknown skip walks to another provider without quota HTTP", async () => {
+      setup();
+      const { input, setModel, notes } = await loadCodex({ token: undefined, current: codexModels[0] });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "continue" });
+      expect(setModel).toEqual([models[0]]);
+      expect(notes.some(([text]) => text.includes("quota unknown") && text.includes("onUnknown=skip"))).toBe(true);
+      expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
+    });
     test("startup unknown use emits a warning without needing credentials", async () => {
       setup({ quota: { "openai-codex": { onUnknown: "use" } } });
       const { input, setModel, notes } = await loadCodex({ token: undefined });

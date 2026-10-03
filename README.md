@@ -14,7 +14,7 @@ policy, and pi switches to the matching model.
 - **Budget-aware** — daily/monthly caps downgrade tiers automatically instead of overspending.
 - **Resilient** — each tier is a candidate chain; if a model is unavailable or unauthenticated, the next one is used.
 - **Visible** — the transcript records the chosen model and the exact reason (kind, complexity, capability, reasoning, budget pressure).
-- **Fails open** — a missing key, timeout, or unknown model just warns and runs your prompt on the current model.
+- **Fails open by default** — a missing key, timeout, or unknown model warns and keeps the current model; opt-in quota protection can stop submission to an ineligible model.
 
 ## How it works
 
@@ -32,7 +32,7 @@ you type a prompt
    code composes the decision
      demand = 0.55·complexity + 0.45·capability (+ reasoning nudge)
      demand = max(demand, kind floor)          # planning/review never go cheap
-     confidence guard → budget guard → availability guard → cache guard
+     confidence guard → budget guard → availability/quota guard → cache guard
         │
         ▼
    pi.setModel(...) + pi.setThinkingLevel(...)  → the turn runs on that model
@@ -732,11 +732,17 @@ to the pool. Check the provider's data policy before enabling it.
 
 ## Failure behaviour
 
-Routing never blocks your turn. A missing key, network error, timeout (default
-3.5 s, retried on 429/529), or unknown model means: warn in the status line and
-run the prompt on the current model unchanged. Prompts starting with `/`, pure
-acknowledgements (`yes`, `continue`, …), and messages sent by other extensions
-are never routed.
+By default, routing failures do not block your turn. A missing key, network
+error, timeout (default 3.5 s, retried on 429/529), or unknown model warns and
+runs the prompt on the current model unchanged.
+
+[Opt-in quota protection](#codex-quota-guards) is the exception: if routing cannot
+switch safely and the current model is quota-ineligible, the router reports
+**prompt not sent**. Such prompts are not automatically queued.
+
+Prompts starting with `/` and messages sent by other extensions are not routed.
+Acknowledgements (`yes`, `continue`, …) and short continuations normally stay
+on the current model, but are routed when quota protection rejects that model.
 
 ## Publishing to pi.dev/packages
 
@@ -799,9 +805,9 @@ cp -R extensions/pi-jev-model-router ~/.pi/agent/extensions/
 Tests and typecheck (the same checks CI runs on every PR):
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run typecheck   # tsc against the real pi ExtensionAPI types
-bun test            # router, config, Jev client, budget, and extension load/route tests
+bun test            # policy, config, HTTP clients, ranking, and extension integration tests
 ```
 
 Tests stub `fetch`, so they never hit the network. Tests that load config mock
@@ -817,12 +823,21 @@ Layout:
 | `extensions/pi-jev-model-router/router.ts` | composition (`decide`), tier/kind chains, availability fallback |
 | `extensions/pi-jev-model-router/budget.ts` | spend ledger, caps, pressure |
 | `extensions/pi-jev-model-router/ranking.ts` | scores file, tier cut-offs, provider spread for `/jev-router suggest` |
+| `extensions/pi-jev-model-router/quota.ts` | Codex quota readings, eligibility checks, session-owned background cache |
 
 No runtime dependencies: the extension talks to TypeSafe with plain `fetch`. It
 imports `typebox` (tool schema) and `@earendil-works/pi-coding-agent` (config
 directory path), and loads `@earendil-works/pi-tui` **lazily**, only when the host
 implements `registerEntryRenderer`. `@earendil-works/pi-tui` is declared as an
 **optional** peer dependency, so hosts that don't ship it still install and run.
+
+## Contributing
+
+- Work on a feature/fix branch and open a PR targeting `main`; do not push directly to `main`.
+- Use TDD for behavior changes: write a failing test, implement the fix, then refactor with tests green.
+- Add regression coverage and update docs when behavior or configuration changes.
+- Before pushing, run `bun run typecheck`, `bun test`, and `git diff --check`; include results in the PR.
+- Keep tests offline with mocked HTTP and temporary state. See [AGENTS.md](AGENTS.md) for the repo map and development constraints.
 
 ## Compatibility with pi builds and forks
 
