@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type CodexQuotaConfig, type JevRouterConfig, type RouteTarget } from "../extensions/pi-jev-model-router/config";
 import type { RouteAnalysis } from "../extensions/pi-jev-model-router/jev";
 import { decide, firstAvailable, type AvailableModel } from "../extensions/pi-jev-model-router/router";
@@ -55,6 +55,89 @@ test("eligibility uses the resolved provider after model-ID fallback", () => {
   const available = firstAvailable([{ provider: "other", id: "sol" }], [sol], eligible(undefined, { ...policy, onUnknown: "skip" }));
   expect(available?.model.provider).toBe("other");
 });
+describe("quota scope and xpremium eligibility", () => {
+  const astra: RouteTarget = { provider: codex, model: "astra", minQuota: { fiveHour: 0.3, weekly: 0.3 } };
+  const astraModel: AvailableModel = { provider: codex, id: astra.model };
+  const healthy: QuotaSnapshot = { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.5 }, weekly: { remaining: 0.5 } } };
+
+  function guardedRoute(patch: Partial<JevRouterConfig> = {}, reading = healthy, judgement = analysis) {
+    const consulted: RouteTarget[] = [];
+    const decision = decide(judgement, config({
+      routes: { quick: [other], standard: [luna], high: [luna], premium: [luna], xpremium: [astra] },
+      ...patch,
+    }), {
+      models: [...models, astraModel],
+      spend: { today: 0, month: 0, pressure: 0 },
+      eligibility: (target, model) => {
+        consulted.push(target);
+        return quotaEligibility(target, model.provider, policy, reading);
+      },
+    });
+    return { decision, consulted };
+  }
+
+  test("confident premium demand reaches an eligible xpremium quota target", () => {
+    const { decision, consulted } = guardedRoute();
+    expect(decision?.tier).toBe("xpremium");
+    expect(decision?.model?.id).toBe("astra");
+    expect(consulted).toEqual([astra]);
+  });
+
+  test("eligible xpremium with 25% quota skips a 30% target and falls back to premium", () => {
+    const { decision, consulted } = guardedRoute({}, {
+      fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.25 }, weekly: { remaining: 0.25 } },
+    });
+    expect(consulted[0]).toBe(astra);
+    expect(decision?.desiredTier).toBe("xpremium");
+    expect(decision?.tier).toBe("premium");
+    expect(decision?.model?.id).toBe("luna");
+    expect(decision?.notes).toContain("astra skipped: codex fiveHour 25.0% < 30.0%");
+    expect(decision?.notes).toContain("astra skipped: codex weekly 25.0% < 30.0%");
+  });
+
+  for (const kindConfidence of [0, DEFAULT_CONFIG.confidenceThreshold - 0.01]) {
+    test(`ineligible confidence ${kindConfidence} never consults an xpremium-only target`, () => {
+      const { decision, consulted } = guardedRoute({}, healthy, { ...analysis, kindConfidence });
+      expect(decision?.model?.id).toBe("luna");
+      expect(consulted.some((target) => target.model === "astra")).toBe(false);
+    });
+  }
+
+  test("duplicate model entries keep their own floors, not a global model floor", () => {
+    const highEntry = { ...astra, minQuota: { fiveHour: 0.05, weekly: 0.05 } };
+    const { decision, consulted } = guardedRoute({
+      routes: { quick: [other], standard: [], high: [highEntry], premium: [], xpremium: [astra] },
+    }, { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.2 }, weekly: { remaining: 0.2 } } },
+    { ...analysis, complexity: 2, budgetIntensity: 2 });
+    expect(decision?.tier).toBe("high");
+    expect(decision?.target).toBe(highEntry);
+    expect(decision?.model?.id).toBe("astra");
+    expect(consulted).toEqual([highEntry]);
+  });
+
+  test("repeating a strict floor on a lower entry rejects that entry too", () => {
+    const highEntry = { ...astra };
+    const { decision, consulted } = guardedRoute({
+      routes: { quick: [other], standard: [luna], high: [highEntry], premium: [], xpremium: [astra] },
+    }, { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.2 }, weekly: { remaining: 0.2 } } },
+    { ...analysis, complexity: 2, budgetIntensity: 2 });
+    expect(decision?.model?.id).toBe("luna");
+    expect(consulted).toEqual([highEntry, luna]);
+    expect(decision?.notes).toContain("astra skipped: codex weekly 20.0% < 30.0%");
+  });
+
+  test("xpremium gating does not forbid the same model explicitly configured lower", () => {
+    const standardEntry = { ...astra, minQuota: { weekly: 0.05 } };
+    const { decision, consulted } = guardedRoute({
+      routes: { quick: [other], standard: [standardEntry], high: [], premium: [], xpremium: [astra] },
+    }, healthy, { ...analysis, kindConfidence: DEFAULT_CONFIG.confidenceThreshold - 0.01 });
+    expect(decision?.tier).toBe("standard");
+    expect(decision?.target).toBe(standardEntry);
+    expect(decision?.model?.id).toBe("astra");
+    expect(consulted).toEqual([standardEntry]);
+  });
+});
+
 test("missing snapshots default to use with a note, while skip walks to another provider", () => {
   const unknown: QuotaSnapshot = { fetchedAt: Date.now(), windows: {} };
   expect(route({}, unknown)?.model?.id).toBe("sol");

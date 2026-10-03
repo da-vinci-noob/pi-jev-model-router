@@ -191,7 +191,10 @@ as an error.
 
 Opt in with `quota.openai-codex` and set provider-wide or per-target `minQuota`
 floors for remaining `fiveHour` and `weekly` account quota. The stricter floor
-wins. Quota readings refresh in the background using Pi's credentials, not on
+wins. Target floors belong to each entry: repeat them if a model appears in
+multiple chains. They all check the shared account snapshot, not independent
+model allowances. `xpremium` gates its chain, not model IDs listed elsewhere.
+Quota readings refresh in the background using Pi's credentials, not on
 each turn. Missing or stale readings use `onUnknown` (`use` by default, or
 `skip`). Cache retention and confirmation overrides cannot bypass the guard.
 See [Codex quota guards](../../README.md#codex-quota-guards) for configuration,

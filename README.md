@@ -623,6 +623,19 @@ Provider floors apply to every resolved Codex model; target floors in `routes`,
 `kindModels`, or `free.pool` can only make them stricter. Codex quota is one
 account pool, not a separate allowance for each model. Only `fiveHour` and
 `weekly` are supported in this first version; other providers are unchanged.
+**Per-target thresholds do not mean model-scoped quota readings:** every Codex
+target is checked against the same account snapshot.
+
+`minQuota` belongs to the **individual route entry**, not globally to its model
+ID or capability tier. If the same model appears in `high`, `xpremium`, or a
+kind chain, repeat its floors on each entry you want protected. Different entries
+for the same model can intentionally have different floors; a strict floor on
+one does not automatically propagate to the others.
+
+Likewise, `xpremium` eligibility gates that chain, not the model ID. A model
+configured only in `routes.xpremium` is not consulted on an ineligible turn,
+but explicitly adding it to a lower-tier chain allows that entry to serve
+lower-tier turns, subject to its own quota floors.
 
 Adding the `quota.openai-codex` object enables the reader (`enabled: false`
 disables it). Without that object, no quota requests or gates run. Floors on
