@@ -302,6 +302,7 @@ interface ApplyResult {
   message: string;
 }
 
+/** Defined whenever the tier guard prompted, including acceptance. */
 interface GuardOutcome {
   /** The user declined, or the timeout policy rejected. The switch is abandoned. */
   keep: boolean;
@@ -351,19 +352,18 @@ async function guardTierSwitch(
 
   const ladder = TIERS.map((tier, index) => `${index + 1} ${tier}`).join("   ");
   const answer = await ctx.ui.input(
-    `Jev → ${decision.tier} (${decisionModelKey(decision)})\n${decision.reason}`,
-    `Y/Enter switch · N keep · 0 free · ${ladder}`,
+    `Jev → ${decision.tier} (${decisionModelKey(decision)})\n${decision.reason}\nY/Enter switch · N keep · 0 free · ${ladder}`,
+    undefined,
     confirm.timeoutMs > 0 ? { timeout: confirm.timeoutMs } : undefined,
   );
 
   // `undefined` is a dismiss or a timeout; an empty string is Enter, which accepts.
   if (answer === undefined) {
-    if (confirm.onTimeout === "reject") return { keep: true, rerouted: false };
-    return undefined;
+    return { keep: confirm.onTimeout === "reject", rerouted: false };
   }
 
   const choice = answer.trim().toLowerCase();
-  if (choice === "" || choice === "y" || choice === "yes") return undefined;
+  if (choice === "" || choice === "y" || choice === "yes") return { keep: false, rerouted: false };
   if (choice === "0") {
     const servable = runtime.config.free.enabled
       ? firstServable(runtime.config.free.pool, runtime.models)
@@ -441,6 +441,7 @@ async function applyDecision(
   // Confirm mode needs a working select prompt; otherwise fall through to auto-switch.
   if (
     runtime.config.mode === "confirm" &&
+    guard === undefined &&
     options.allowPrompt !== false &&
     typeof ctx.ui?.select === "function"
   ) {

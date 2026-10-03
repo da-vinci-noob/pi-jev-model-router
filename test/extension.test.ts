@@ -258,9 +258,40 @@ describe("pi extension", () => {
       await input("plan a migration for the upload client");
       expect(dialogs).toHaveLength(1);
       expect(dialogs[0].title).toContain("xprem-a");
-      expect(dialogs[0].placeholder).toContain("0 free");
-      expect(dialogs[0].placeholder).toContain("1 quick");
+      expect(dialogs[0].placeholder).toBeUndefined();
+      expect(dialogs[0].title).toContain("Y/Enter switch · N keep · 0 free");
+      expect(dialogs[0].title).toContain("1 quick   2 standard   3 high   4 premium   5 xpremium");
       expect(dialogs[0].opts).toEqual({ timeout: 10000 });
+      expect(setModel).toEqual([models[4]]);
+    });
+
+    for (const [label, answer, expected] of [
+      ["Enter", "", models[4]],
+      ["Y", "y", models[4]],
+      ["timeout acceptance", undefined, models[4]],
+      ["tier override", "3", models[2]],
+      ["free override", "0", models[0]],
+    ] as const) {
+      test(`confirm mode asks only once on ${label}`, async () => {
+        writeGuarded({ mode: "confirm" });
+        expensive();
+        const { input, dialogs, setModel } = await load({ answer });
+
+        await input("plan a migration for the upload client");
+        expect(dialogs).toHaveLength(1);
+        expect(dialogs[0].options).toBeUndefined();
+        expect(setModel).toEqual([expected]);
+      });
+    }
+
+    test("unguarded confirm mode still uses the select dialog", async () => {
+      writeGuarded({ mode: "confirm", confirm: { tiers: [] } });
+      expensive();
+      const { input, dialogs, setModel } = await load({ select: "Use xpremium — testprov/xprem-a" });
+
+      await input("plan a migration for the upload client");
+      expect(dialogs).toHaveLength(1);
+      expect(dialogs[0].options).toBeDefined();
       expect(setModel).toEqual([models[4]]);
     });
 
@@ -326,6 +357,7 @@ describe("pi extension", () => {
 
       await input("plan a migration for the upload client");
       expect(dialogs[0].opts).toBeUndefined();
+      expect(dialogs[0].title).toContain("0 free");
     });
 
     test("does not ask for a tier that is not guarded", async () => {
