@@ -314,7 +314,6 @@ ahead of a paid `high` specialist:
 {
   "kindModels": {
     "write": [
-      { "provider": "opencode-go", "model": "space-bunny-free", "minTier": "quick", "priority": 1 },
       { "provider": "openrouter", "model": "~anthropic/claude-sonnet-latest", "minTier": "high" }
     ]
   }
@@ -685,7 +684,6 @@ the judgment is untouched and a free model never has to pretend to be a tier.
     "enabled": true,
     "policy": "prefer",
     "pool": [
-      { "provider": "opencode-go", "model": "space-bunny-free", "thinkingLevel": "medium" },
       { "provider": "opencode-go", "model": "longcat-2.5-preview-free", "thinkingLevel": "medium" }
     ]
   }
