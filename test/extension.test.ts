@@ -17,10 +17,36 @@ const generatedFile = join(agentDir, "pi-jev-model-router.generated.json");
 
 const cost = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 };
 const models = ["quick-a", "std-a", "high-a", "prem-a", "xprem-a"].map((id) => ({ provider: "testprov", id, cost }));
+// Two providers on the same kind chain, so a provider cooldown has somewhere to send the next pick.
+const chainModels = [
+  { provider: "alpha", id: "alpha-coder", cost },
+  { provider: "beta", id: "beta-coder", cost },
+];
+// Same routes as the default fixture, with a two-provider implement chain on top.
+const chainConfig = {
+  apiKey: "test-key",
+  routes: {
+    quick: [{ provider: "testprov", model: "quick-a" }],
+    standard: [{ provider: "testprov", model: "std-a", thinkingLevel: "low" }],
+    high: [{ provider: "testprov", model: "high-a" }],
+    premium: [{ provider: "testprov", model: "prem-a" }],
+  },
+  kindModels: {
+    implement: [
+      { provider: "alpha", model: "alpha-coder", minTier: "standard" },
+      { provider: "beta", model: "beta-coder", minTier: "standard" },
+    ],
+  },
+};
 const realFetch = globalThis.fetch;
 const savedKey = process.env.TYPESAFE_API_KEY;
 let cwd: string;
 let fetchCalls: string[];
+// Controllable clock, so provider-cooldown TTL expiry is deterministic.
+let now = 1_000_000;
+const COOLDOWN_TTL_MS = 60_000;
+const realDateNow = Date.now;
+Date.now = () => now;
 const shutdowns: Array<() => Promise<unknown>> = [];
 
 function writeProjectConfig(patch: Record<string, unknown>): void {
@@ -70,13 +96,19 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   const dialogs: Array<{ title: string; placeholder?: string; opts?: unknown; options?: string[] }> = [];
   let answer = options.answer;
   const selectAnswer = options.select;
+  // Real pi reflects setModel in ctx.model, so the fake tracks it the same way.
+  let currentModel = options.current ?? models[0];
   const fake: Record<string, unknown> = { on: (event: string, handler: Handler) => handlers.set(event, handler) };
   if (!options.minimal) {
     Object.assign(fake, {
       registerCommand: (name: string, command: Command) => commands.set(name, command),
       registerTool: () => {},
       appendEntry: () => {},
-      setModel: async (model: unknown) => (setModel.push(model), true),
+      setModel: async (model: unknown) => {
+        setModel.push(model);
+        currentModel = model as typeof currentModel;
+        return true;
+      },
       setThinkingLevel: (level: unknown) => thinking.push(level),
     });
   }
@@ -85,7 +117,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   const notes: Array<[string, string]> = [];
   const ctx = {
     cwd,
-    model: options.current ?? models[0],
+    get model() { return currentModel; },
     modelRegistry: {
       getAvailable: () => availableModels,
       find: (provider: string, id: string) => availableModels.find((m) => m.provider === provider && m.id === id),
@@ -108,10 +140,14 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   };
   await handlers.get("session_start")!({}, ctx);
   shutdowns.push(() => handlers.get("session_shutdown")!({}, ctx));
+  const afterProviderResponse = handlers.get("after_provider_response");
+  const respondToProvider = async (status: number) => {
+    await afterProviderResponse?.({ type: "after_provider_response", status, headers: {} }, ctx);
+  };
   if (options.token) await new Promise((resolve) => setTimeout(resolve, 0));
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
   const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
-  return { input, command, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
+  return { input, command, notes, setModel, thinking, dialogs, respondToProvider, setAnswer: (v: string | undefined) => { answer = v } };
 }
 
 beforeEach(() => {
@@ -129,7 +165,10 @@ afterEach(async () => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
-afterAll(() => rmSync(home, { recursive: true, force: true }));
+afterAll(() => {
+  Date.now = realDateNow;
+  rmSync(home, { recursive: true, force: true });
+});
 
 describe("pi extension", () => {
   test("routes a prompt end to end: switches to the judged tier model and pins its thinking level", async () => {
@@ -140,6 +179,51 @@ describe("pi extension", () => {
     expect(fetchCalls).toHaveLength(1);
     expect(setModel).toEqual([models[1]]);
     expect(thinking).toEqual(["low"]);
+  });
+
+  test("a 429 on one provider makes the next route skip that provider", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    writeProjectConfig(chainConfig);
+    const { input, setModel, respondToProvider } = await load({ models: chainModels });
+
+    expect(await input("add a retry to the upload client")).toEqual({ action: "continue" });
+    expect(setModel).toEqual([chainModels[0]]);
+
+    // alpha answered HTTP 429, so it is cooling down.
+    await respondToProvider(429);
+
+    expect(await input("add a retry to the upload client")).toEqual({ action: "continue" });
+    expect(setModel).toEqual([chainModels[0], chainModels[1]]);
+  });
+
+  test("a 529 cools the provider down too, but other statuses do not", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    writeProjectConfig(chainConfig);
+    const { input, setModel, respondToProvider } = await load({ models: chainModels });
+
+    await respondToProvider(500);
+    await input("add a retry to the upload client");
+    expect(setModel).toEqual([chainModels[0]]);
+
+    await respondToProvider(529);
+    await input("add a retry to the upload client");
+    expect(setModel).toEqual([chainModels[0], chainModels[1]]);
+  });
+
+  test("the cooldown expires and the provider becomes routable again", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    writeProjectConfig(chainConfig);
+    const { input, setModel, respondToProvider } = await load({ models: chainModels });
+
+    await input("add a retry to the upload client");
+    await respondToProvider(429);
+    await input("add a retry to the upload client");
+    expect(setModel).toEqual([chainModels[0], chainModels[1]]);
+
+    // The cooldown is time-based; rewinding past the TTL restores alpha.
+    now += COOLDOWN_TTL_MS + 1;
+    await input("add a retry to the upload client");
+    expect(setModel.at(-1)).toEqual(chainModels[0]);
   });
 
   test("keeps the current model when Jev picks the model already in use", async () => {

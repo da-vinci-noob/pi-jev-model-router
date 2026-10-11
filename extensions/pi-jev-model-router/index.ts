@@ -54,7 +54,14 @@ interface Runtime {
   lastEntrySignature?: string;
   quota?: CodexQuotaCache;
   routeNotes: string[];
+  /** Provider -> epoch ms until which it is treated as rate-limited. */
+  cooldowns: Map<string, number>;
 }
+
+// A provider that answers 429/529 is temporarily rate-limited, so the next routing
+// decision should prefer another provider instead of retrying into the same wall.
+const COOLDOWN_STATUSES = new Set([429, 529]);
+const COOLDOWN_TTL_MS = 60_000;
 
 const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it|proceed|nice|thanks|thank you|ty)[.!]?$/i;
 
@@ -262,7 +269,17 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 }
 
 function eligibilityFor(runtime: Runtime): TargetEligibility {
-  return (target, model) => quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  return (target, model) => {
+    const quota = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+    if (!quota.allowed) return quota;
+    const until = runtime.cooldowns.get(model.provider);
+    if (until === undefined || Date.now() >= until) return quota;
+    const left = Math.ceil((until - Date.now()) / 1000);
+    return {
+      allowed: false,
+      notes: [...quota.notes, `${model.provider} cooling down after HTTP 429/529 (~${left}s left)`],
+    };
+  };
 }
 
 function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
@@ -582,6 +599,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     ledger: loadLedger(loadConfig().stateFile),
     models: [],
     routeNotes: [],
+    cooldowns: new Map(),
   };
 
   // Not every pi build/fork exposes the full ExtensionAPI surface. Detect the
@@ -638,10 +656,26 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     }
   }
 
+  // Rate-limit signal: cool the provider down so the next Jev suggestion routes
+  // somewhere else. This never retries the failed turn — the user resubmits.
+  pi.on("after_provider_response", async (event, ctx) => {
+    if (!COOLDOWN_STATUSES.has(event.status)) return;
+    const provider = ctx.model?.provider;
+    if (!provider) return;
+    const until = Date.now() + COOLDOWN_TTL_MS;
+    if ((runtime.cooldowns.get(provider) ?? 0) < until) runtime.cooldowns.set(provider, until);
+    notify(
+      ctx,
+      `jev-router: ${provider} returned HTTP ${event.status}; cooling it down for ${Math.round(COOLDOWN_TTL_MS / 1000)}s and routing the next prompt elsewhere.`,
+      "warning",
+    );
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     runtime.config = loadConfig(ctx.cwd);
     runtime.ledger = loadLedger(runtime.config.stateFile);
     runtime.models = toAvailable(ctx);
+    runtime.cooldowns.clear();
     runtime.quota?.stop();
     runtime.quota = undefined;
     const quotaConfig = runtime.config.quota["openai-codex"];
