@@ -672,6 +672,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     { stateFile: quotaStatePath(runtime.config.stateFile) },
    );
       runtime.quota.start();
+      await runtime.quota.ready;
     }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);

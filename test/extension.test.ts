@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as realOs from "node:os";
@@ -637,18 +638,25 @@ describe("pi extension", () => {
       await command("jev-router", "quota");
       expect(notes.at(-1)?.[0]).toContain("not configured");
     });
-    test("a reading persisted by the previous session gates the first prompt", async () => {
+    test("a matching account reading gates the first prompt before the usage refresh completes", async () => {
       setup();
       writeFileSync(
         join(cwd, "state.json.quota.json"),
-        JSON.stringify({ version: 1, snapshot: { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.5 }, weekly: { remaining: 0.1 } } }, updatedAt: Date.now() }),
+        JSON.stringify({ version: 1, accountKey: createHash("sha256").update("token:test-token").digest("hex"), snapshot: { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.5 }, weekly: { remaining: 0.1 } } }, updatedAt: Date.now() }),
       );
-      const { input, setModel, command, notes } = await loadCodex({ token: undefined, current: codexModels[0] });
+      const usage = Promise.withResolvers<Response>();
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        fetchCalls.push(String(url));
+        return String(url).includes("wham/usage") ? usage.promise : Response.json(jevAnswers("implement", 3));
+      }) as typeof fetch;
+      try {
+        const { input, setModel, command, notes } = await loadCodex({ current: codexModels[0] });
       await input("plan a migration for the upload client");
       expect(setModel).toEqual([codexModels[1]]);
       await command("jev-router", "why");
       expect(notes.some(([text]) => text.includes("sol skipped: codex weekly 10.0% < 20.0%"))).toBe(true);
-      expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
+        expect(fetchCalls.filter((url) => url.includes("wham/usage"))).toHaveLength(1);
+      } finally { usage.resolve(new Response(null, { status: 503 })); }
     });
     test("an endpoint hard limit rejects targets whose percentages look healthy", async () => {
       setup();

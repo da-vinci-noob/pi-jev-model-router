@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { QUOTA_WINDOWS, type CodexQuotaConfig, type QuotaWindow, type RouteTarget } from "./config";
@@ -22,6 +23,8 @@ export interface QuotaCacheState {
   snapshot?: QuotaSnapshot;
   lastError?: string;
   updatedAt: number;
+  /** Stable account fingerprint, or credential fingerprint when the token has no account claim. */
+  accountKey?: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -67,11 +70,16 @@ export function quotaEligibility(
   // An ungated target is never affected, even by a hard stop: the reader is opt-in.
   if (!floors.some((floor) => floor > 0)) return { allowed: true, notes: [] };
   const fresh = snapshot !== undefined && now >= snapshot.fetchedAt && now - snapshot.fetchedAt < config.cacheTtlSec * 1000;
-  if (fresh && snapshot.limitReached === true) {
+  const resetPassed = snapshot?.limitReached && hardLimitReset(snapshot, now);
+  if (fresh && snapshot.limitReached === true && !resetPassed) {
     return { allowed: false, notes: [`${target.model} skipped: codex account limit reached (rate_limit.limit_reached)`] };
   }
   let allowed = true;
   const notes: string[] = [];
+  if (fresh && resetPassed) {
+    allowed = config.onUnknown !== "skip";
+    notes.push(`${target.model} codex account limit unknown (reset); onUnknown=${config.onUnknown}`);
+  }
   for (const window of QUOTA_WINDOWS) {
     const floor = Math.max(config.minQuota[window] ?? 0, target.minQuota?.[window] ?? 0);
     if (floor <= 0) continue;
@@ -113,10 +121,12 @@ export function loadQuotaState(file: string | undefined): QuotaCacheState {
   if (!file) return empty;
   try {
     const data = record(JSON.parse(readFileSync(file, "utf8")));
+    if (data.version !== 1) return empty;
     const raw = record(data.snapshot);
     const lastError = typeof data.lastError === "string" && data.lastError.length > 0 ? data.lastError : undefined;
+    const accountKey = typeof data.accountKey === "string" && /^[a-f0-9]{64}$/.test(data.accountKey) ? data.accountKey : undefined;
     const fetchedAt = finiteNumber(raw.fetchedAt);
-    if (fetchedAt === undefined) return lastError === undefined ? empty : { ...empty, lastError };
+    if (fetchedAt === undefined) return { ...empty, lastError, accountKey, updatedAt: finiteNumber(data.updatedAt) ?? 0 };
     const windows: QuotaSnapshot["windows"] = {};
     const rawWindows = record(raw.windows);
     for (const window of QUOTA_WINDOWS) {
@@ -131,6 +141,7 @@ export function loadQuotaState(file: string | undefined): QuotaCacheState {
       snapshot: { fetchedAt, windows, ...(raw.limitReached === true ? { limitReached: true } : {}) },
       lastError,
       updatedAt: finiteNumber(data.updatedAt) ?? fetchedAt,
+      accountKey,
     };
   } catch {
     return empty;
@@ -175,6 +186,10 @@ function isFresh(config: CodexQuotaConfig, snapshot: QuotaSnapshot, now: number)
   return now >= snapshot.fetchedAt && now - snapshot.fetchedAt < config.cacheTtlSec * 1000;
 }
 
+function hardLimitReset(snapshot: QuotaSnapshot, now: number): boolean {
+  return Object.values(snapshot.windows).some((reading) => reading.resetAt !== undefined && now >= reading.resetAt);
+}
+
 /** One line for `/jev-router status`, from state that is already in memory. */
 export function quotaSummary(input: QuotaStatusInput): string {
   const config = input.config;
@@ -185,9 +200,9 @@ export function quotaSummary(input: QuotaStatusInput): string {
   if (!snapshot) return `quota: codex on, no reading yet${input.lastError ? ` (${input.lastError})` : ""}`;
   const parts = QUOTA_WINDOWS.flatMap((window) => {
     const reading = snapshot.windows[window];
-    return reading ? [`${window === "fiveHour" ? "5h" : window} ${percent(reading.remaining)}`] : [];
+    return reading ? [`${window === "fiveHour" ? "5h" : window} ${percent(reading.remaining)}${reading.resetAt !== undefined && now >= reading.resetAt ? " (reset: unknown)" : ""}`] : [];
   });
-  if (snapshot.limitReached) parts.push("limit reached");
+  if (snapshot.limitReached) parts.push(isFresh(config, snapshot, now) && !hardLimitReset(snapshot, now) ? "limit reached" : "reported limit: unknown");
   const age = span(Math.abs(now - snapshot.fetchedAt));
   parts.push(isFresh(config, snapshot, now) ? `fresh (${age})` : `stale (${age})`);
   return `quota: codex ${parts.join(" / ")}`;
@@ -221,7 +236,9 @@ export function describeQuotaStatus(input: QuotaStatusInput): string[] {
       const reset = reading.resetAt === undefined ? "" : `, resets in ${span(reading.resetAt - now)}${resetPassed ? " (reset passed)" : ""}`;
       lines.push(`${window}: ${percent(reading.remaining)} remaining${reset}${suffix}`);
     }
-    if (snapshot.limitReached) lines.push("limit reached: yes (rate_limit.limit_reached)");
+    if (snapshot.limitReached) lines.push(isFresh(config, snapshot, now) && !hardLimitReset(snapshot, now)
+      ? "limit reached: yes (rate_limit.limit_reached)"
+      : `reported account limit: unknown (stale or reset); onUnknown=${config.onUnknown}`);
     const age = span(Math.abs(now - snapshot.fetchedAt));
     const fresh = isFresh(config, snapshot, now);
     lines.push(`reading: ${fresh ? "fresh" : "stale"} (age ${age}${fresh ? "" : `, ttl ${config.cacheTtlSec}s`})`);
@@ -243,6 +260,11 @@ export class CodexQuotaCache {
   private controller?: AbortController;
   private stopped = false;
   private started = false;
+  private accountKey?: string;
+  private persisted?: QuotaCacheState;
+  private readonly initialization = Promise.withResolvers<void>();
+  /** Resolves after credential validation, without waiting for the usage HTTP response. */
+  readonly ready = this.initialization.promise;
 
   constructor(
     readonly config: CodexQuotaConfig,
@@ -251,16 +273,7 @@ export class CodexQuotaCache {
     private readonly now: () => number = Date.now,
     private readonly options: { stateFile?: string } = {},
   ) {
-    this.restore();
-  }
-
-  /** A restored reading keeps its original timestamp, so the TTL still applies. */
-  private restore(): void {
-    const state = loadQuotaState(this.options.stateFile);
-    this.lastError = state.lastError;
-    if (!state.snapshot) return;
-    this.snapshot = state.snapshot;
-    this.restored = true;
+    this.persisted = loadQuotaState(this.options.stateFile);
   }
 
   private persist(): void {
@@ -269,6 +282,7 @@ export class CodexQuotaCache {
       ...(this.snapshot ? { snapshot: this.snapshot } : {}),
       ...(this.lastError ? { lastError: this.lastError } : {}),
       updatedAt: this.now(),
+      accountKey: this.accountKey,
     });
   }
 
@@ -288,6 +302,7 @@ export class CodexQuotaCache {
     timeout.unref?.();
     this.pending = (async () => {
       let onAbort: () => void = () => {};
+      let authenticated = false;
       try {
         const cancelled = new Promise<never>((_resolve, reject) => {
           onAbort = () => reject(new Error("quota refresh aborted"));
@@ -296,12 +311,28 @@ export class CodexQuotaCache {
         const read = async () => {
           const token = await this.getToken();
           if (signal.aborted || this.stopped) return;
+          const account = token ? codexAccountId(token) : undefined;
+          const accountKey = token ? createHash("sha256").update(account ? `account:${account}` : `token:${token}`).digest("hex") : undefined;
+          if (this.accountKey !== accountKey || !token) {
+            this.snapshot = undefined;
+            this.restored = false;
+            this.lastError = undefined;
+          }
+          this.accountKey = accountKey;
+          if (accountKey && this.persisted?.accountKey === accountKey) {
+            this.snapshot = this.persisted.snapshot;
+            this.lastError = this.persisted.lastError;
+            this.restored = this.snapshot !== undefined;
+          }
+          this.persisted = undefined;
+          authenticated = true;
+          this.initialization.resolve();
           if (!token) {
             this.fail("no openai-codex credentials for the usage endpoint");
             return;
           }
           const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
-          const account = codexAccountId(token);
+          // The fingerprint and account header use the same credential observation.
           if (account) headers["ChatGPT-Account-Id"] = account;
           const response = await this.fetcher(CODEX_USAGE_URL, { headers, signal, redirect: "error" });
           if (signal.aborted || this.stopped) return;
@@ -323,15 +354,20 @@ export class CodexQuotaCache {
           this.persist();
         };
         await Promise.race([read(), cancelled]);
-      } catch (error) {
+      } catch {
         // Never include HTTP bodies, tokens, or provider errors in diagnostics.
         // An old reading retains its original timestamp and expires normally.
         if (!this.stopped) {
-          this.fail(error instanceof Error && error.name === "AbortError"
-            ? "usage request timed out"
-            : `usage request failed (${error instanceof Error ? error.name : "unknown error"})`);
+          if (!authenticated) {
+            this.snapshot = undefined;
+            this.restored = false;
+            this.accountKey = undefined;
+            this.persisted = undefined;
+          }
+          this.fail(signal.aborted ? "usage request timed out" : "usage request failed");
         }
       } finally {
+        this.initialization.resolve();
         signal.removeEventListener("abort", onAbort);
         clearTimeout(timeout);
         this.pending = undefined;
