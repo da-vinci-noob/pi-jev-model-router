@@ -18,6 +18,7 @@ import { Type } from "typebox";
 import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import { CodexQuotaCache, quotaEligibility } from "./quota";
+import { isModelUnavailable, Parking } from "./recovery";
 import {
   formatUsd,
   loadLedger,
@@ -36,6 +37,7 @@ import {
   describeKindRoutes,
   describeDecision,
   firstAvailable,
+ kindCandidates,
   tierIndex,
   tierForModel,
   type AvailableModel,
@@ -54,6 +56,12 @@ interface Runtime {
   lastEntrySignature?: string;
   quota?: CodexQuotaCache;
   routeNotes: string[];
+ parking?: Parking;
+ recovery?: { decision: Decision; analysis: RouteAnalysis; attempted: Set<string>; toolsRan: boolean };
+ failed?: {
+  messageEntryId?: string; toolResults?: unknown[];
+  message?: { role?: string; provider?: string; model?: string; stopReason?: string; errorMessage?: string };
+ };
 }
 
 const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it|proceed|nice|thanks|thank you|ty)[.!]?$/i;
@@ -262,7 +270,13 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 }
 
 function eligibilityFor(runtime: Runtime): TargetEligibility {
-  return (target, model) => quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+ return (target, model) => {
+  const key = `${model.provider}/${model.id}`;
+  if (runtime.config.recovery.enabled && runtime.parking?.has(key)) {
+   return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
+  }
+  return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+ };
 }
 
 function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
@@ -270,7 +284,9 @@ function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: str
   const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
   const target = runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
     ? runtime.lastDecision.target : targetForModel(runtime.config, model);
-  return eligibleTarget(target, model, eligibilityFor(runtime), notes);
+ const result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+ for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
+ return result.allowed;
 }
 
 /** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
@@ -642,6 +658,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.config = loadConfig(ctx.cwd);
     runtime.ledger = loadLedger(runtime.config.stateFile);
     runtime.models = toAvailable(ctx);
+  runtime.parking = new Parking(`${runtime.config.stateFile}.recovery.json`);
+  runtime.recovery = undefined;
     runtime.quota?.stop();
     runtime.quota = undefined;
     const quotaConfig = runtime.config.quota["openai-codex"];
@@ -696,9 +714,75 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       saveLedger(runtime.config.stateFile, runtime.ledger);
     }
   });
+ pi.on("tool_execution_start", async () => {
+  if (runtime.recovery) runtime.recovery.toolsRan = true;
+ });
+ pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; });
+ pi.on("turn_end", async (event) => {
+  runtime.failed = event as unknown as Runtime["failed"];
+ });
+ pi.on("agent_before_settle", async (event, ctx) => {
+  // Failed requests can bypass finishTurn; recover only at the final actionable boundary.
+  const boundary = { ...runtime.failed, ...event } as unknown as NonNullable<Runtime["failed"]> & {
+   entries?: unknown[]; context?: { canContinue?: boolean };
+  };
+  const state = runtime.recovery;
+  const message = boundary.message;
+  if (!runtime.config.enabled || !runtime.config.recovery.enabled || !state ||
+   typeof boundary.messageEntryId !== "string" || !Array.isArray(boundary.entries) ||
+   !boundary.context || state.toolsRan || boundary.toolResults?.length ||
+   message?.role !== "assistant" || message.stopReason !== "error" ||
+   !message.provider || !message.model || !isModelUnavailable(message.errorMessage ?? "", message.model)) return;
+  const failedKey = `${message.provider}/${message.model}`;
+  if (!runtime.lastDecision || decisionModelKey(runtime.lastDecision) !== failedKey) return;
+  state.attempted.add(failedKey);
+  if (!runtime.parking?.park(failedKey, runtime.config.recovery.parkMs)) {
+   notify(ctx, "jev-router: model parked in memory, but recovery state could not be saved", "warning");
+  }
+  const ceiling = state.decision.tierIndex;
+  const available = toAvailable(ctx).filter((model) => !state.attempted.has(`${model.provider}/${model.id}`));
+  const free = runtime.config.free.enabled ? runtime.config.free.pool.filter((target) =>
+   available.some((model) => model.provider === target.provider && model.id === target.model)) : [];
+  const chains = [
+   ...(runtime.config.free.policy === "prefer" ? [{ tier: 0, targets: free }] : []),
+   { tier: ceiling, targets: kindCandidates(runtime.config, state.analysis.kind, ceiling) },
+   ...Array.from({ length: ceiling + 1 }, (_, offset) => ({
+    tier: ceiling - offset, targets: runtime.config.routes[TIERS[ceiling - offset]],
+   })),
+   ...(runtime.config.free.policy === "fallback-only" ? [{ tier: 0, targets: free }] : []),
+  ];
+  for (const chain of chains) {
+   const pick = firstAvailable(available, chain.targets, eligibilityFor(runtime));
+   if (!pick) continue;
+   const decision: Decision = {
+    ...state.decision, ...pick, tier: TIERS[chain.tier], tierIndex: chain.tier,
+    held: false, reason: `recovering unavailable model ${failedKey}`, notes: [],
+   };
+   // Recovery offers only accept/reject, so confirmation cannot escape the approved ceiling.
+   if (runtime.config.mode === "notify") return;
+   if (runtime.config.mode === "confirm" || runtime.config.confirm.tiers.includes(decision.tier)) {
+    if (typeof ctx.ui?.input !== "function") return;
+    const answer = await ctx.ui.input(`Recover on ${decisionModelKey(decision)}? Y/Enter accept · N cancel`,
+     undefined, runtime.config.confirm.timeoutMs > 0 ? { timeout: runtime.config.confirm.timeoutMs } : undefined);
+    if (answer === undefined ? runtime.config.confirm.onTimeout === "reject" : !/^(y|yes)?$/i.test(answer.trim())) return;
+   }
+   const model = ctx.modelRegistry?.find?.(pick.model.provider, pick.model.id);
+   if (!model || !eligibleTarget(pick.target, pick.model, eligibilityFor(runtime)) || ctx.signal?.aborted) return;
+   state.attempted.add(`${pick.model.provider}/${pick.model.id}`);
+   if (!(await switchModel(model))) return;
+   if (pick.target.thinkingLevel) setThinking(pick.target.thinkingLevel);
+   runtime.lastDecision = decision;
+   runtime.appliedTierIndex = decision.tierIndex;
+   appendDecisionEntry(state.analysis, decision, "rerouted", runtime);
+   notify(ctx, `jev-router: ${decision.reason}; continuing on ${decisionModelKey(decision)}`, "warning");
+   return { entries: [...boundary.entries, { type: "context_edit", targetId: boundary.messageEntryId, replacement: null }], continue: true } as never;
+  }
+  notify(ctx, "jev-router: unavailable model parked; no eligible recovery model remains. Failure left visible.", "warning");
+ });
 
   // The routing hook: classify the prompt with Jev, then switch models in place.
   pi.on("input", async (event, ctx) => {
+  runtime.recovery = undefined;
     if (!runtime.config.enabled) return { action: "continue" };
     if (event.source === "extension") return { action: "continue" };
     if (event.images?.length && !event.text?.trim()) {
@@ -740,6 +824,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       }
       const applied = await applyDecision(analysis, decision, ctx, runtime);
       if (applied.blocked) return { action: "handled" };
+   if (runtime.config.recovery.enabled && ["kept", "switched", "rerouted"].includes(applied.action)) {
+    runtime.recovery = { decision: { ...decision, notes: [...decision.notes] }, analysis, attempted: new Set(), toolsRan: false };
+   }
     } catch (error) {
       statusLine(ctx, runtime);
       const message = error instanceof JevError ? error.message : error instanceof Error ? error.message : String(error);
@@ -754,6 +841,14 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       switch ((sub ?? "status").toLowerCase()) {
+    case "recovery": {
+     if (rest[0] === "clear") {
+      notify(ctx, runtime.parking?.clear() ? "jev-router: recovery parks cleared" : "jev-router: parks cleared in memory; state file could not be saved", "warning");
+     } else {
+      notify(ctx, [`recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`, ...(runtime.parking?.list() ?? [])].join("\n"), "info");
+     }
+     return;
+    }
         case "on":
           runtime.config.enabled = true;
           statusLine(ctx, runtime);
@@ -899,6 +994,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             `spend today: ${formatUsd(spend.today)}${spend.dailyCap ? ` / ${formatUsd(spend.dailyCap)}` : ""}`,
             `spend month: ${formatUsd(spend.month)}${spend.monthlyCap ? ` / ${formatUsd(spend.monthlyCap)}` : ""}`,
             `budget pressure: ${spend.pressure > 0 ? `${(spend.pressure * 100).toFixed(0)}%` : "no caps set"}`,
+      `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
+      ...(runtime.parking?.list() ?? []),
             `cache-aware: ${runtime.config.cache.aware ? `on (cap ${formatUsd(runtime.config.cache.maxPenaltyUsd)}, deadband ${runtime.config.cache.deadband})` : "off"}`,
             `built-in models: ${runtime.config.useDefaultModels ? "on" : "off (config-only)"}`,
             `jev requests: ${runtime.ledger.jev.requests}`,

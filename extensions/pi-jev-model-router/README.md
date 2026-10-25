@@ -84,13 +84,14 @@ export TYPESAFE_API_KEY=...
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, routes, kind specialists, last decision |
+| `/jev-router` | Status: mode, spend, routes, kind specialists, last decision, recovery parks |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
 | `/jev-router budget monthly 150` | Session-only monthly cap |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the previous model if quota eligibility allows it |
+| `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
 | `/jev-router suggest [--write]` | Propose routes from local scores; optionally save the generated config layer |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
 
@@ -199,6 +200,26 @@ each turn. Missing or stale readings use `onUnknown` (`use` by default, or
 `skip`). Cache retention and confirmation overrides cannot bypass the guard.
 See [Codex quota guards](../../README.md#codex-quota-guards) for configuration,
 reset handling, submission protection, and limitations.
+
+### Unavailable-model recovery
+
+Opt in with `"recovery": { "enabled": true, "parkMs": 3600000 }`.
+It is disabled by default; `parkMs` must be finite and positive (milliseconds,
+default one hour). A confirmed model-specific unavailable error captured at
+`turn_end` is recovered at the actionable `agent_before_settle` boundary, after
+host retries have finished. The resolved provider/model is parked in
+`<stateFile>.recovery.json`, then the router selects an eligible fallback at or below the
+approved tier using the existing routing gates. Recovery continues the same
+submission without a second Jev call and never replays after any tool has run in
+that submission. Unsupported hosts leave the failure visible.
+
+Parks survive sessions and expire automatically. Inspect status and active parks
+with `/jev-router`; `/jev-router recovery clear` removes them immediately.
+429/5xx, authentication, context-limit, abort, and generic 404 failures do not
+park models or trigger recovery. There are no transient retries or `maxRetries`.
+See [Unavailable-model recovery](../../README.md#unavailable-model-recovery) for
+the complete boundaries and configuration.
+
 
 ## Tuning notes
 

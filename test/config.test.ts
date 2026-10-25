@@ -149,6 +149,31 @@ describe("loadConfig", () => {
     expect(config.cache).toEqual({ ...DEFAULT_CONFIG.cache, deadband: 0.5 });
   });
 
+  test("recovery is disabled by default and partial overrides preserve prior valid fields", () => {
+    expect(loadConfig(cwd).recovery).toEqual({ enabled: false, parkMs: 3600000 });
+    writeGlobal({ recovery: { enabled: true, parkMs: 2000 } });
+    writeProject({ recovery: { parkMs: 0.5 } });
+    expect(loadConfig(cwd).recovery).toEqual({ enabled: true, parkMs: 0.5 });
+    writeProject({ recovery: { enabled: false } });
+    expect(loadConfig(cwd).recovery).toEqual({ enabled: false, parkMs: 2000 });
+    expect(DEFAULT_CONFIG.recovery).toEqual({ enabled: false, parkMs: 3600000 });
+  });
+
+  test("recovery rejects non-positive, non-finite, and non-numeric parking durations", () => {
+    writeGlobal({ recovery: { enabled: true, parkMs: 2000 } });
+    for (const parkMs of [0, -1, null, "1000", true, {}, []]) {
+      writeProject({ recovery: { enabled: "yes", parkMs } });
+      expect(loadConfig(cwd).recovery).toEqual({ enabled: true, parkMs: 2000 });
+    }
+    // JSON numbers can overflow to Infinity without using an invalid JSON literal.
+    writeFileSync(join(cwd, ".pi", "pi-jev-model-router.json"), '{"recovery":{"parkMs":1e309}}');
+    expect(loadConfig(cwd).recovery).toEqual({ enabled: true, parkMs: 2000 });
+    for (const recovery of [null, true, [], "enabled"]) {
+      writeProject({ recovery });
+      expect(loadConfig(cwd).recovery).toEqual({ enabled: true, parkMs: 2000 });
+    }
+  });
+
   test("kindMinimumTier partial override keeps the other floors", () => {
     writeProject({ kindMinimumTier: { chat: "standard" } });
     expect(loadConfig(cwd).kindMinimumTier).toEqual({ ...DEFAULT_CONFIG.kindMinimumTier, chat: "standard" });

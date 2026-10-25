@@ -7,6 +7,10 @@
   "timeoutMs": 3500,
   "confidenceThreshold": 0.34,
   "stickiness": true,
+  "recovery": {
+    "enabled": false,
+    "parkMs": 3600000
+  },
   "budget": {
     "dailyUsd": 5,
     "monthlyUsd": 100,

@@ -173,6 +173,7 @@ export interface JevRouterConfig {
   ranking: RankingConfig;
   confirm: ConfirmConfig;
   quota: { "openai-codex"?: CodexQuotaConfig };
+  recovery: { enabled: boolean; parkMs: number };
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -321,6 +322,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     spreadProviders: true,
   },
   quota: {},
+  recovery: { enabled: false, parkMs: 3600000 },
   confirm: {
     tiers: ["xpremium"],
     timeoutMs: 10000,
@@ -429,6 +431,14 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
         ? confirmPatch.onTimeout
         : base.confirm.onTimeout,
   };
+  const recoveryPatch = asRecord(p.recovery);
+  const recovery: JevRouterConfig["recovery"] = {
+    enabled: typeof recoveryPatch.enabled === "boolean" ? recoveryPatch.enabled : base.recovery.enabled,
+    parkMs:
+      typeof recoveryPatch.parkMs === "number" && Number.isFinite(recoveryPatch.parkMs) && recoveryPatch.parkMs > 0
+        ? recoveryPatch.parkMs
+        : base.recovery.parkMs,
+  };
   const quota = { ...base.quota };
   const rawCodex = asRecord(p.quota)["openai-codex"];
   if (rawCodex && typeof rawCodex === "object" && !Array.isArray(rawCodex)) {
@@ -452,6 +462,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     ranking,
     confirm,
     quota,
+    recovery,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {

@@ -111,7 +111,13 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   if (options.token) await new Promise((resolve) => setTimeout(resolve, 0));
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
   const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
-  return { input, command, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
+  const emit = (name: string, event: unknown) => handlers.get(name)?.(event, ctx);
+  const settle = async (failure: { entries?: unknown[]; context?: unknown;[key: string]: unknown }) => {
+    await emit("turn_end", failure);
+    await emit("agent_end", {});
+    return emit("agent_before_settle", { entries: failure.entries, context: failure.context, outcome: "error" });
+  };
+  return { input, command, emit, settle, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
 }
 
 beforeEach(() => {
@@ -132,6 +138,83 @@ afterEach(async () => {
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 describe("pi extension", () => {
+  test("recovers an unavailable model without a second classification and persists its park", async () => {
+    writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    const failure = {
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "model_not_found: std-a" },
+      messageEntryId: "failed-entry", entries: [], context: { canContinue: true }, toolResults: [],
+    };
+    expect(await host.settle(failure)).toEqual({
+      entries: [{ type: "context_edit", targetId: "failed-entry", replacement: null }], continue: true,
+    });
+    expect(host.setModel).toEqual([models[1], models[0]]);
+    expect(fetchCalls).toHaveLength(1);
+    expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(true);
+    const next = await load();
+    await next.input("add a retry to another upload client");
+    expect(next.setModel).not.toContainEqual(models[1]);
+    await next.command("jev-router", "recovery clear");
+    await next.input("add a retry to the original upload client");
+    expect(next.setModel).toContainEqual(models[1]);
+  });
+
+  test("recovery never replays after a tool in an earlier turn of the submission", async () => {
+    writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    await host.emit("tool_execution_start", { toolName: "write" });
+    expect(await host.settle({
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "model_not_found: std-a" },
+      messageEntryId: "failed-entry", entries: [], context: { canContinue: true }, toolResults: [],
+    })).toBeUndefined();
+    expect(host.setModel).toEqual([models[1]]);
+  });
+
+  test("legacy host boundary and ordinary errors leave the failure visible", async () => {
+    writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    for (const errorMessage of ["404 Not Found", "429 model std-a unavailable", "model_not_found: std-a"]) {
+      expect(await host.settle({
+        message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage }, toolResults: [],
+      })).toBeUndefined();
+    }
+    expect(host.setModel).toEqual([models[1]]);
+  });
+  test("recovery exhausts its ceiling without escalating or revisiting a failed model", async () => {
+    writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    for (const id of ["std-a", "quick-a"]) {
+      await host.settle({
+        message: { role: "assistant", provider: "testprov", model: id, stopReason: "error", errorMessage: `model_not_found: ${id}` },
+        messageEntryId: id, entries: [], context: { canContinue: true }, toolResults: [],
+      });
+    }
+    expect(host.setModel).toEqual([models[1], models[0]]);
+    expect(host.notes.some(([text]) => text.includes("no eligible recovery model remains"))).toBe(true);
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  test("recovery is disabled by default even on an actionable boundary", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    expect(await host.settle({
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "model_not_found: std-a" },
+      messageEntryId: "failed", entries: [], context: { canContinue: true }, toolResults: [],
+    })).toBeUndefined();
+    expect(host.setModel).toEqual([models[1]]);
+    expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(false);
+  });
+
+
   test("routes a prompt end to end: switches to the judged tier model and pins its thinking level", async () => {
     stubFetch(() => Response.json(jevAnswers("implement", 1)));
     const { input, setModel, thinking } = await load();

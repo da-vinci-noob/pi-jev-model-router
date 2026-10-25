@@ -120,13 +120,14 @@ disabled. No configuration is required — sensible defaults are built in.
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision |
+| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, recovery parks |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
 | `/jev-router budget monthly 150` | Session-only monthly cap |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
+| `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
 | `/jev-router suggest` | Rank your scored models into proposed `routes` / `kindModels` and print them (see [Ranking models from your own scores](#ranking-models-from-your-own-scores)) |
 | `/jev-router suggest --write` | Same, and save it as a generated config layer that your own config overrides |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
@@ -672,6 +673,43 @@ This reduces the risk of mid-flight cancellation; it cannot reserve quota or
 predict how much a long-running turn will consume. Model-scoped quotas, generic
 HTTP adapters, and turn-dependent floors are deliberately deferred.
 
+## Unavailable-model recovery
+
+Recovery is **off by default**. Opt in explicitly:
+
+```json
+{
+  "recovery": {
+    "enabled": true,
+    "parkMs": 3600000
+  }
+}
+```
+
+`parkMs` is a finite positive duration in milliseconds (default: one hour).
+Only a confirmed **model-specific unavailable** error triggers recovery: for
+example, an explicit model-not-found or model-retired response. HTTP status alone
+is insufficient. Rate limits (429), server errors (5xx), authentication failures,
+context limits, aborts, and generic 404s do not park models or trigger retries.
+This is not transient-error retry support; there is no `maxRetries` setting.
+
+On a supported host, the router captures the failed entry at `turn_end` and
+recovers at `agent_before_settle`, after host retries have finished. It parks the
+**resolved provider/model** (not a configured alias), and tries an
+eligible fallback at or below the approved tier. Existing availability,
+capability, budget, quota, free-pool, and confirmation gates still apply.
+Recovery continues the **same submission**, reusing its routing judgment without
+a second Jev call. It never replays a submission after **any tool has run** in
+that submission. If the host cannot safely continue at that boundary, or no
+eligible fallback exists, the failure remains visible rather than pretending the
+prompt succeeded.
+
+Parks persist in `<stateFile>.recovery.json` across sessions and expire after
+`parkMs`; subsequent routing skips parked resolved models until expiry. Inspect
+recovery status and active parks with `/jev-router`, or remove them immediately
+with `/jev-router recovery clear`. Disabling recovery leaves ordinary routing
+unchanged.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -737,6 +775,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `free` | disabled | Free-model pool consulted outside the tier scale (`prefer` or `fallback-only`) |
 | `confirm` | `tiers: ["xpremium"]`, `timeoutMs: 10000`, `onTimeout: "accept"` | Ask before switching into these tiers; `0` forces the free pool, `1` to `5` jump to a tier |
 | `quota` | disabled | Cached Codex 5h/weekly remaining-quota floors, independent of spend |
+| `recovery` | `enabled: false`, `parkMs: 3600000` | Opt-in confirmed unavailable-model recovery and persistent resolved-model parking |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
