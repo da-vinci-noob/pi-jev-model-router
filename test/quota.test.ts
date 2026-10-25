@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -212,15 +213,15 @@ describe("Codex quota hard limit, persistence and status", () => {
   test("a restored reading gates the first turn and a refresh rewrites it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "jev-quota-"));
     const file = quotaStatePath(join(dir, "state.json"));
-    saveQuotaState(file, { version: 1, snapshot: { fetchedAt: now, windows: { fiveHour: { remaining: 0.02 }, weekly: { remaining: 0.9 } } }, updatedAt: now });
-    const offline = new CodexQuotaCache(config, async () => undefined, (async () => { throw new Error("no fetch expected"); }) as unknown as typeof fetch, () => now, { stateFile: file });
+    saveQuotaState(file, { version: 1, accountKey: createHash("sha256").update("token:token").digest("hex"), snapshot: { fetchedAt: now, windows: { fiveHour: { remaining: 0.02 }, weekly: { remaining: 0.9 } } }, updatedAt: now });
+    const offline = new CodexQuotaCache(config, async () => "token", (async () => new Response(null, { status: 503 })) as unknown as typeof fetch, () => now, { stateFile: file });
+    await offline.refresh();
     expect(offline.restored).toBe(true);
     expect(offline.snapshot?.windows.fiveHour?.remaining).toBeCloseTo(0.02);
     expect(quotaEligibility(target, target.provider, { ...config, onUnknown: "skip" }, offline.snapshot, now).allowed).toBe(false);
     offline.stop();
 
     const live = new CodexQuotaCache(config, async () => "token", (async () => Response.json(payload(50))) as unknown as typeof fetch, () => now + 1000, { stateFile: file });
-    expect(live.restored).toBe(true);
     await live.refresh();
     expect(live.snapshot?.fetchedAt).toBe(now + 1000);
     expect(live.restored).toBe(false);

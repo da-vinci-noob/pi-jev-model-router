@@ -647,23 +647,30 @@ The reader uses Pi's resolved `openai-codex` credentials and the fixed endpoint
 `https://chatgpt.com/backend-api/wham/usage`. You do not need to copy tokens into
 config. It refreshes in the background from `session_start`, with a five-second
 refresh deadline, and stops on `session_shutdown`. Routing never waits for a
-quota HTTP request. Each reading is persisted beside the spend ledger as
-`<stateFile>.quota.json`, so a new session inherits the last fetch instead of
-starting blind, and the last refresh failure is written there for after-the-fact
-debugging. Tokens, response bodies, and provider error text are never stored or
-logged. The endpoint is provider-specific and may change.
+quota HTTP request. Startup waits only for Pi's credential lookup (within the
+same five-second deadline), so an authenticated restored reading is available
+before the first prompt. Each reading is persisted beside the spend ledger as
+`<stateFile>.quota.json`, along with the last refresh failure for diagnostics.
+Restoration requires a matching SHA-256 account fingerprint; tokens without an
+account claim use a credential fingerprint instead. Account changes or missing
+credentials invalidate the old reading. Legacy files without a fingerprint are
+unknown until refreshed. Tokens, account IDs, response bodies, and provider error
+text are never stored or logged. The endpoint is provider-specific and may change.
 
 The endpoint also reports a provider-level stop. `rate_limit.limit_reached: true`
 or `rate_limit.allowed: false` marks the reading as limited, and every gated
 target is skipped whatever the window percentages say, with
-`skipped: codex account limit reached`. A stale limited reading counts as unknown
-again, so `onUnknown` still decides.
+`skipped: codex account limit reached`. A stale limited reading, or a hard-stop
+reading whose earliest reported window reset has passed, counts as unknown
+again, so `onUnknown` decides the account-limit uncertainty. Other known
+below-floor windows still reject the target; a reset never invents headroom.
 
 Missing windows, expired readings, and readings whose reset time has passed are
 **unknown**. `use` admits those models with a visible note; `skip` rejects them.
-Startup stays unknown until the first fetch lands, unless a persisted reading is
-still inside its TTL. A failed refresh does not extend the old reading's
-freshness or the last good reading. The reader refreshes at the earlier of the TTL
+Startup stays unknown until the first fetch lands, unless an identity-matched
+persisted reading is still inside its TTL. Token rotation within the same
+reported account preserves its reading. A failed refresh does not extend the
+old reading's freshness. The reader refreshes at the earlier of the TTL
 or the next reported reset; a nearby reset never waives a floor or assumes the
 account is full.
 
