@@ -1,6 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CodexQuotaConfig, RouteTarget } from "../extensions/pi-jev-model-router/config";
-import { CODEX_USAGE_URL, CodexQuotaCache, codexAccountId, parseCodexUsage, quotaEligibility } from "../extensions/pi-jev-model-router/quota";
+import {
+  CODEX_USAGE_URL,
+  CodexQuotaCache,
+  codexAccountId,
+  describeQuotaStatus,
+  loadQuotaState,
+  parseCodexUsage,
+  quotaEligibility,
+  quotaStatePath,
+  saveQuotaState,
+} from "../extensions/pi-jev-model-router/quota";
 
 const now = 1_800_000_000_000;
 const config: CodexQuotaConfig = { enabled: true, cacheTtlSec: 120, onUnknown: "use", minQuota: { fiveHour: 0.05 } };
@@ -152,5 +165,101 @@ describe("Codex background cache", () => {
     cache.stop();
     await new Promise((resolve) => setTimeout(resolve, 1100));
     expect(calls).toBe(2);
+  });
+});
+
+describe("Codex quota hard limit, persistence and status", () => {
+  function payloadWithLimit(limit: Record<string, unknown>, used = 0) {
+    return { rate_limit: { ...limit,
+      primary_window: { used_percent: used, limit_window_seconds: 18000 },
+      secondary_window: { used_percent: used, limit_window_seconds: 604800 },
+    } };
+  }
+  test("an endpoint hard limit rejects gated targets whatever the percentages say", () => {
+    for (const limit of [{ limit_reached: true }, { allowed: false }]) {
+      const snapshot = parseCodexUsage(payloadWithLimit(limit), now);
+      expect(snapshot.limitReached).toBe(true);
+      const result = check(snapshot);
+      expect(result.allowed).toBe(false);
+      expect(result.notes[0]).toContain("codex account limit reached");
+    }
+    const plain = { provider: "openai-codex", model: "plain" };
+    expect(quotaEligibility(plain, "openai-codex", { ...config, minQuota: {} }, parseCodexUsage(payloadWithLimit({ limit_reached: true }), now), now))
+      .toEqual({ allowed: true, notes: [] });
+    expect(parseCodexUsage(payload(), now).limitReached).toBeUndefined();
+  });
+  test("a stale hard limit is unknown, not exhausted", () => {
+    const stale = { ...parseCodexUsage(payloadWithLimit({ limit_reached: true }), now), fetchedAt: now - 300000 };
+    expect(check(stale, { onUnknown: "use" }).allowed).toBe(true);
+    expect(check(stale, { onUnknown: "skip" }).allowed).toBe(false);
+  });
+  test("readings round-trip through the state file and reject corrupt content", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jev-quota-"));
+    const file = quotaStatePath(join(dir, "state.json"));
+    expect(file).toBe(join(dir, "state.json.quota.json"));
+    expect(loadQuotaState(file).snapshot).toBeUndefined();
+    saveQuotaState(file, { version: 1, snapshot: { fetchedAt: now, windows: { fiveHour: { remaining: 0.02 }, weekly: { remaining: 0.5, resetAt: now + 1000 } } }, updatedAt: now });
+    const restored = loadQuotaState(file);
+    expect(restored.snapshot?.windows.fiveHour?.remaining).toBeCloseTo(0.02);
+    expect(restored.snapshot?.windows.weekly?.resetAt).toBe(now + 1000);
+    expect(restored.snapshot?.fetchedAt).toBe(now);
+    writeFileSync(file, "not json");
+    expect(loadQuotaState(file).snapshot).toBeUndefined();
+    writeFileSync(file, JSON.stringify({ version: 1, snapshot: { fetchedAt: "soon", windows: {} } }));
+    expect(loadQuotaState(file).snapshot).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("a restored reading gates the first turn and a refresh rewrites it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jev-quota-"));
+    const file = quotaStatePath(join(dir, "state.json"));
+    saveQuotaState(file, { version: 1, snapshot: { fetchedAt: now, windows: { fiveHour: { remaining: 0.02 }, weekly: { remaining: 0.9 } } }, updatedAt: now });
+    const offline = new CodexQuotaCache(config, async () => undefined, (async () => { throw new Error("no fetch expected"); }) as unknown as typeof fetch, () => now, { stateFile: file });
+    expect(offline.restored).toBe(true);
+    expect(offline.snapshot?.windows.fiveHour?.remaining).toBeCloseTo(0.02);
+    expect(quotaEligibility(target, target.provider, { ...config, onUnknown: "skip" }, offline.snapshot, now).allowed).toBe(false);
+    offline.stop();
+
+    const live = new CodexQuotaCache(config, async () => "token", (async () => Response.json(payload(50))) as unknown as typeof fetch, () => now + 1000, { stateFile: file });
+    expect(live.restored).toBe(true);
+    await live.refresh();
+    expect(live.snapshot?.fetchedAt).toBe(now + 1000);
+    expect(live.restored).toBe(false);
+    const saved = loadQuotaState(file);
+    expect(saved.snapshot?.fetchedAt).toBe(now + 1000);
+    expect(saved.snapshot?.windows.weekly?.remaining).toBeCloseTo(0.5);
+    live.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("failures record a trail without leaking response bodies", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jev-quota-"));
+    const file = quotaStatePath(join(dir, "state.json"));
+    const cache = new CodexQuotaCache(config, async () => "token", (async () => new Response("secret body", { status: 503 })) as unknown as typeof fetch, () => now, { stateFile: file });
+    await cache.refresh();
+    expect(cache.snapshot).toBeUndefined();
+    expect(cache.lastError).toContain("503");
+    expect(cache.lastError).not.toContain("secret");
+    expect(loadQuotaState(file).lastError).toContain("503");
+    const noToken = new CodexQuotaCache(config, async () => undefined, (async () => Response.json(payload())) as unknown as typeof fetch, () => now, { stateFile: file });
+    await noToken.refresh();
+    expect(noToken.lastError).toContain("credentials");
+    cache.stop();
+    noToken.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("status output shows remaining ratios, freshness and the last error", () => {
+    const snapshot = parseCodexUsage(payload(83), now);
+    const fresh = describeQuotaStatus({ config, snapshot, now }).join("\n");
+    expect(fresh).toContain("codex quota: on");
+    expect(fresh).toContain("fiveHour: 10.0% remaining");
+    expect(fresh).toContain("weekly: 17.0% remaining");
+    expect(fresh).toContain("resets in");
+    expect(fresh).toContain("fresh");
+    expect(fresh).not.toContain("last error");
+    const stale = describeQuotaStatus({ config, snapshot, now: now + 300000, lastError: "usage endpoint returned HTTP 503" }).join("\n");
+    expect(stale).toContain("stale");
+    expect(stale).toContain("last error: usage endpoint returned HTTP 503");
+    expect(describeQuotaStatus({ now }).join("\n")).toContain("not configured");
+    expect(describeQuotaStatus({ config: { ...config, enabled: false }, now }).join("\n")).toContain("disabled");
+    expect(describeQuotaStatus({ config, snapshot: { fetchedAt: now, windows: {}, limitReached: true }, now }).join("\n")).toContain("limit reached");
   });
 });

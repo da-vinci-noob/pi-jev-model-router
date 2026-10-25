@@ -6,7 +6,7 @@
  * deserves, then route the turn to the matching model tier. Code applies the
  * budget policy; Jev only judges the task.
  *
- * Commands:  /jev-router [status|on|off|mode|budget|why|revert|suggest [--write]]
+ * Commands:  /jev-router [status|quota|on|off|mode|budget|why|revert|suggest [--write]]
  *            /jev-route <text>
  * Tool:      jev_route
  */
@@ -17,7 +17,7 @@ import { dirname } from "node:path";
 import { Type } from "typebox";
 import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
-import { CodexQuotaCache, quotaEligibility } from "./quota";
+import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary } from "./quota";
 import { isModelUnavailable, Parking } from "./recovery";
 import {
   formatUsd,
@@ -664,7 +664,13 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.quota = undefined;
     const quotaConfig = runtime.config.quota["openai-codex"];
     if (quotaConfig?.enabled) {
-      runtime.quota = new CodexQuotaCache(quotaConfig, async () => ctx.modelRegistry?.getApiKeyForProvider?.("openai-codex"));
+   runtime.quota = new CodexQuotaCache(
+    quotaConfig,
+    async () => ctx.modelRegistry?.getApiKeyForProvider?.("openai-codex"),
+    globalThis.fetch,
+    Date.now,
+    { stateFile: quotaStatePath(runtime.config.stateFile) },
+   );
       runtime.quota.start();
     }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
@@ -837,7 +843,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
   });
 
   if (hasCommands) pi.registerCommand("jev-router", {
-    description: "TypeSafe Jev model router: status, on/off, mode, budget, suggest [--write]",
+  description: "TypeSafe Jev model router: status, quota, on/off, mode, budget, suggest [--write]",
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       switch ((sub ?? "status").toLowerCase()) {
@@ -885,6 +891,20 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           }
           statusLine(ctx, runtime);
           notify(ctx, `budget ${rest[0]} cap: ${formatUsd(amount)} (session only — persist in pi-jev-model-router.json)`, "info");
+     return;
+    }
+    case "quota": {
+     const quotaConfig = runtime.config.quota["openai-codex"];
+     notify(
+      ctx,
+      describeQuotaStatus({
+       config: quotaConfig,
+       snapshot: runtime.quota?.snapshot,
+       lastError: runtime.quota?.lastError,
+       restored: runtime.quota?.restored,
+      }).join("\n"),
+      quotaConfig?.enabled ? "info" : "warning",
+     );
           return;
         }
         case "revert": {
@@ -994,6 +1014,12 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             `spend today: ${formatUsd(spend.today)}${spend.dailyCap ? ` / ${formatUsd(spend.dailyCap)}` : ""}`,
             `spend month: ${formatUsd(spend.month)}${spend.monthlyCap ? ` / ${formatUsd(spend.monthlyCap)}` : ""}`,
             `budget pressure: ${spend.pressure > 0 ? `${(spend.pressure * 100).toFixed(0)}%` : "no caps set"}`,
+      quotaSummary({
+       config: runtime.config.quota["openai-codex"],
+       snapshot: runtime.quota?.snapshot,
+       lastError: runtime.quota?.lastError,
+       restored: runtime.quota?.restored,
+      }),
       `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
       ...(runtime.parking?.list() ?? []),
             `cache-aware: ${runtime.config.cache.aware ? `on (cap ${formatUsd(runtime.config.cache.maxPenaltyUsd)}, deadband ${runtime.config.cache.deadband})` : "off"}`,

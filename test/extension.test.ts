@@ -619,6 +619,50 @@ describe("pi extension", () => {
       expect(notes.some(([text]) => text.includes("quota unknown"))).toBe(true);
       expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
     });
+    test("/jev-router quota and status show the live reading", async () => {
+      setup();
+      const { command, notes } = await loadCodex();
+      await command("jev-router", "quota");
+      const quota = notes.at(-1)?.[0] ?? "";
+      expect(quota).toContain("codex quota: on");
+      expect(quota).toContain("fiveHour: 10.0% remaining");
+      expect(quota).toContain("weekly: 17.0% remaining");
+      expect(quota).toContain("fresh");
+      await command("jev-router", "status");
+      expect(notes.at(-1)?.[0]).toContain("quota: codex");
+    });
+    test("/jev-router quota explains a missing configuration", async () => {
+      setup({ quota: undefined });
+      const { command, notes } = await loadCodex({ token: undefined });
+      await command("jev-router", "quota");
+      expect(notes.at(-1)?.[0]).toContain("not configured");
+    });
+    test("a reading persisted by the previous session gates the first prompt", async () => {
+      setup();
+      writeFileSync(
+        join(cwd, "state.json.quota.json"),
+        JSON.stringify({ version: 1, snapshot: { fetchedAt: Date.now(), windows: { fiveHour: { remaining: 0.5 }, weekly: { remaining: 0.1 } } }, updatedAt: Date.now() }),
+      );
+      const { input, setModel, command, notes } = await loadCodex({ token: undefined, current: codexModels[0] });
+      await input("plan a migration for the upload client");
+      expect(setModel).toEqual([codexModels[1]]);
+      await command("jev-router", "why");
+      expect(notes.some(([text]) => text.includes("sol skipped: codex weekly 10.0% < 20.0%"))).toBe(true);
+      expect(fetchCalls.some((url) => url.includes("wham/usage"))).toBe(false);
+    });
+    test("an endpoint hard limit rejects targets whose percentages look healthy", async () => {
+      setup();
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        fetchCalls.push(String(url));
+        return String(url).includes("wham/usage")
+          ? Response.json({ rate_limit: { limit_reached: true, primary_window: { used_percent: 0, limit_window_seconds: 18000 }, secondary_window: { used_percent: 0, limit_window_seconds: 604800 } } })
+          : Response.json(jevAnswers("implement", 3));
+      }) as typeof fetch;
+      const { input, setModel, notes } = await loadCodex({ current: codexModels[0] });
+      expect(await input("plan a migration for the upload client")).toEqual({ action: "continue" });
+      expect(setModel).toEqual([models[0]]);
+      expect(notes.some(([text]) => text.includes("codex account limit reached"))).toBe(true);
+    });
   });
 
   describe("/jev-router suggest", () => {

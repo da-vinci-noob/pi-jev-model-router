@@ -21,7 +21,7 @@ Runtime packages are host-provided peers; TUI support is optional and lazy-loade
 | `router.ts` | Synchronous decisions, candidates, fallback, cache guards | `test/router.test.ts`, `test/quota-router.test.ts` |
 | `budget.ts` | UTC spend ledger, caps, pressure, best-effort persistence | `test/budget.test.ts` |
 | `ranking.ts` | Local scores, tier cutoffs, provider spread, route proposals | `test/ranking.test.ts` |
-| `quota.ts` | Codex usage normalization, eligibility, background cache | `test/quota.test.ts`, `test/quota-router.test.ts` |
+| `quota.ts` | Codex usage normalization, eligibility, background cache, persisted readings, status output | `test/quota.test.ts`, `test/quota-router.test.ts` |
 
 Source paths in this table are relative to `extensions/pi-jev-model-router/`.
 The example JSON and extension README live there too. CI is

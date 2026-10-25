@@ -125,6 +125,7 @@ disabled. No configuration is required — sensible defaults are built in.
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
 | `/jev-router budget monthly 150` | Session-only monthly cap |
+| `/jev-router quota` | Show the cached Codex reading: remaining per window, reset countdown, age, and the last refresh error |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
 | `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
@@ -646,19 +647,34 @@ The reader uses Pi's resolved `openai-codex` credentials and the fixed endpoint
 `https://chatgpt.com/backend-api/wham/usage`. You do not need to copy tokens into
 config. It refreshes in the background from `session_start`, with a five-second
 refresh deadline, and stops on `session_shutdown`. Routing never waits for a
-quota HTTP request. Readings are in memory only; authentication errors and HTTP
-response bodies are not logged. The endpoint is provider-specific and may change.
+quota HTTP request. Each reading is persisted beside the spend ledger as
+`<stateFile>.quota.json`, so a new session inherits the last fetch instead of
+starting blind, and the last refresh failure is written there for after-the-fact
+debugging. Tokens, response bodies, and provider error text are never stored or
+logged. The endpoint is provider-specific and may change.
+
+The endpoint also reports a provider-level stop. `rate_limit.limit_reached: true`
+or `rate_limit.allowed: false` marks the reading as limited, and every gated
+target is skipped whatever the window percentages say, with
+`skipped: codex account limit reached`. A stale limited reading counts as unknown
+again, so `onUnknown` still decides.
 
 Missing windows, expired readings, and readings whose reset time has passed are
 **unknown**. `use` admits those models with a visible note; `skip` rejects them.
-Startup can be unknown until the first background fetch completes. A failed
-refresh does not extend the old reading's freshness. The reader refreshes at the
-earlier of the TTL or the next reported reset; a nearby reset never waives a floor
-or assumes the account is full.
+Startup stays unknown until the first fetch lands, unless a persisted reading is
+still inside its TTL. A failed refresh does not extend the old reading's
+freshness or the last good reading. The reader refreshes at the earlier of the TTL
+or the next reported reset; a nearby reset never waives a floor or assumes the
+account is full.
 
 Quota checks also apply to cache retention, confirmation overrides, and
 `/jev-router revert`. Rejections appear in decision notes and `/jev-router why`,
 for example `gpt-5.4 skipped: codex weekly 17.0% < 20.0%`.
+
+`/jev-router quota` prints what the guard currently knows: remaining ratio per
+window, reset countdown, reading age against the TTL, whether the reading was
+restored or fetched this session, and the last refresh error. `/jev-router status`
+carries the same reading on one line.
 
 If no eligible route exists and the current model is also quota-ineligible, the
 router explicitly reports **prompt not sent** instead of submitting it to that
@@ -778,7 +794,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `recovery` | `enabled: false`, `parkMs: 3600000` | Opt-in confirmed unavailable-model recovery and persistent resolved-model parking |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
-| `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
+| `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger; Codex readings persist beside it as `pi-jev-model-router-state.json.quota.json` |
 
 ## Failure behaviour
 
@@ -873,7 +889,7 @@ Layout:
 | `extensions/pi-jev-model-router/router.ts` | composition (`decide`), tier/kind chains, availability fallback |
 | `extensions/pi-jev-model-router/budget.ts` | spend ledger, caps, pressure |
 | `extensions/pi-jev-model-router/ranking.ts` | scores file, tier cut-offs, provider spread for `/jev-router suggest` |
-| `extensions/pi-jev-model-router/quota.ts` | Codex quota readings, eligibility checks, session-owned background cache |
+| `extensions/pi-jev-model-router/quota.ts` | Codex quota readings, eligibility checks, session-owned background cache, persisted state and status output |
 
 No runtime dependencies: the extension talks to TypeSafe with plain `fetch`. It
 imports `typebox` (tool schema) and `@earendil-works/pi-coding-agent` (config

@@ -89,6 +89,7 @@ export TYPESAFE_API_KEY=...
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
 | `/jev-router budget monthly 150` | Session-only monthly cap |
+| `/jev-router quota` | Show the cached Codex reading: remaining per window, age, and the last refresh error |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the previous model if quota eligibility allows it |
 | `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
@@ -198,8 +199,12 @@ model allowances. `xpremium` gates its chain, not model IDs listed elsewhere.
 Quota readings refresh in the background using Pi's credentials, not on
 each turn. Missing or stale readings use `onUnknown` (`use` by default, or
 `skip`). Cache retention and confirmation overrides cannot bypass the guard.
-See [Codex quota guards](../../README.md#codex-quota-guards) for configuration,
-reset handling, submission protection, and limitations.
+Readings persist next to the spend ledger (`<stateFile>.quota.json`), so a new
+session inherits the last fetch while it is still inside the TTL, and a
+`limit_reached` response skips every gated target regardless of percentages.
+`/jev-router quota` shows the current reading, its age, and the last refresh
+error. See [Codex quota guards](../../README.md#codex-quota-guards) for
+configuration, reset handling, submission protection, and limitations.
 
 ### Unavailable-model recovery
 
