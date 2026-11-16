@@ -174,6 +174,21 @@ describe("loadConfig", () => {
     }
   });
 
+  test("rate-limit parking defaults on with a 24h park and validates overrides", () => {
+    expect(loadConfig(cwd).rateLimit).toEqual({ enabled: true, parkMs: 86_400_000 });
+    writeGlobal({ rateLimit: { enabled: false, parkMs: 1000 } });
+    writeProject({ rateLimit: { parkMs: 2000 } });
+    expect(loadConfig(cwd).rateLimit).toEqual({ enabled: false, parkMs: 2000 });
+    writeProject({ rateLimit: { parkMs: 0 } });
+    expect(loadConfig(cwd).rateLimit).toEqual({ enabled: false, parkMs: 1000 });
+    for (const rateLimit of [null, true, [], "enabled"]) {
+      writeProject({ rateLimit });
+      expect(loadConfig(cwd).rateLimit).toEqual({ enabled: false, parkMs: 1000 });
+    }
+    expect(DEFAULT_CONFIG.rateLimit).toEqual({ enabled: true, parkMs: 86_400_000 });
+  });
+
+
   test("kindMinimumTier partial override keeps the other floors", () => {
     writeProject({ kindMinimumTier: { chat: "standard" } });
     expect(loadConfig(cwd).kindMinimumTier).toEqual({ ...DEFAULT_CONFIG.kindMinimumTier, chat: "standard" });

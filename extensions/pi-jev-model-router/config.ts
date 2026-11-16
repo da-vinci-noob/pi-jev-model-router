@@ -130,6 +130,12 @@ export interface RankingConfig {
   spreadProviders: boolean;
 }
 
+/** Reactive rate-limit parking, keyed by the resolved provider/model. */
+export interface RateLimitConfig {
+  enabled: boolean;
+  parkMs: number;
+}
+
 export interface JevRouterConfig {
   enabled: boolean;
   mode: Mode;
@@ -174,6 +180,7 @@ export interface JevRouterConfig {
   confirm: ConfirmConfig;
   quota: { "openai-codex"?: CodexQuotaConfig };
   recovery: { enabled: boolean; parkMs: number };
+  rateLimit: RateLimitConfig;
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -323,6 +330,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
   },
   quota: {},
   recovery: { enabled: false, parkMs: 3600000 },
+  rateLimit: { enabled: true, parkMs: 86_400_000 },
   confirm: {
     tiers: ["xpremium"],
     timeoutMs: 10000,
@@ -439,6 +447,15 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
         ? recoveryPatch.parkMs
         : base.recovery.parkMs,
   };
+  const rateLimitPatch = asRecord(p.rateLimit);
+  const rateLimit: JevRouterConfig["rateLimit"] = {
+    enabled: typeof rateLimitPatch.enabled === "boolean" ? rateLimitPatch.enabled : base.rateLimit.enabled,
+    parkMs:
+      typeof rateLimitPatch.parkMs === "number" && Number.isFinite(rateLimitPatch.parkMs) && rateLimitPatch.parkMs > 0
+        ? rateLimitPatch.parkMs
+        : base.rateLimit.parkMs,
+  };
+
   const quota = { ...base.quota };
   const rawCodex = asRecord(p.quota)["openai-codex"];
   if (rawCodex && typeof rawCodex === "object" && !Array.isArray(rawCodex)) {
@@ -463,6 +480,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     confirm,
     quota,
     recovery,
+    rateLimit,
     budget: { ...base.budget, ...asRecord(p.budget) } as BudgetConfig,
     cache: { ...base.cache, ...asRecord(p.cache) } as CacheConfig,
     kindMinimumTier: {
