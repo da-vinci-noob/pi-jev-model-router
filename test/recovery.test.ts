@@ -11,6 +11,20 @@ describe("escalating rate-limit bans", () => {
       expect(rateLimitParkMs(cap, strike)).toBe(expected);
     }
   });
+  test("an expired park stays eligible but keeps its strike across unrelated saves and restart", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jev-expired-strikes-"));
+    try {
+      const path = join(dir, "state.json.recovery.json");
+      const cap = 86_400_000;
+      const parks = new Parking(path);
+      const later = 901_001;
+      expect(parks.rateLimit("a/beam-free", cap, 1000)).toBe(900_000);
+      parks.rateLimit("a/other-free", cap, later);
+      const restored = new Parking(path);
+      expect(restored.has("a/beam-free", later)).toBe(false);
+      expect(restored.rateLimit("a/beam-free", cap, later)).toBe(3_600_000);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   test("the streak is per model, survives restart, and clears after a success", () => {
     const dir = mkdtempSync(join(tmpdir(), "jev-escalation-"));
     try {
@@ -35,12 +49,15 @@ describe("rate-limit parking", () => {
       "429", "429 Too Many Requests", "rate limit exceeded for model std-a",
       "rate_limit_error: slow down", "RateLimitError: too many requests",
       "quota exceeded for this API key", "usage limit reached", "You have hit your usage limit",
+      "429 Too Many Requests: rate limit of 10,000 tokens per minute exceeded",
+      "429: token limit exceeded (10,000 tokens per minute)",
     ]) {
       expect(isRateLimited(error)).toBe(true);
     }
     for (const error of [
       "model_not_found: std-a", "500 internal server error", "401 invalid API key",
       "context length exceeded for std-a", "token limit reached", "max_tokens exceeded", "aborted",
+      "429: 10,000 tokens per request exceeded", "429: context window too large",
     ]) {
       expect(isRateLimited(error)).toBe(false);
     }
