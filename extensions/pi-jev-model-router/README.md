@@ -233,9 +233,10 @@ the complete boundaries and configuration.
 
 Rate-limit parking is on by default. A 429 or rate/quota/usage-limit error parks
 the resolved provider/model, not the whole provider. Consecutive hits escalate the
-ban from 15 minutes through 1h, 4h and 12h to the 24-hour cap, and a successful
-turn on that model resets the streak. Configure with `"rateLimit": { "enabled":
-true, "parkMs": 86400000 }`, where `parkMs` is the maximum ban. See
+ban from 15 minutes through 1h, 4h and 12h to the 24-hour cap. The streak survives
+cooldown expiry and restarts until a successful turn on that model. Configure
+with `"rateLimit": { "enabled": true, "parkMs": 86400000 }`; disabling it does
+not disable unavailable-model recovery. See
 [Rate-limit parking](../../README.md#rate-limit-parking) for detection rules and
 boundaries.
 

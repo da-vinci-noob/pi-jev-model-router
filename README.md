@@ -752,15 +752,17 @@ Rate-limit parking is **on by default** and independent of model recovery:
 per-model limit never bans the whole provider. Consecutive hits on the same model
 escalate the ban: 15 minutes, 1 hour, 4 hours, 12 hours, then the `parkMs` cap. The
 streak is stored with the parks in `<stateFile>.recovery.json` and survives
-restarts. A successful assistant turn on that model clears the streak, so a model
-that recovers starts again at 15 minutes.
+cooldown expiry and restarts. Only a completed assistant turn on that model
+clears the streak; a cancelled turn doesn't.
 
 The boundaries match recovery: detection at `turn_end`, reroute at
 `agent_before_settle`, one Jev call, no replay after a tool has run. A rate limit
 is recognized from HTTP 429 and from rate-limit, quota, usage-limit, and
-too-many-requests error text. Token, context, and payload size limits are capacity
-errors, not rate limits, and never park a model. Set `enabled: false` to disable;
-`/jev-router` lists active parks and `/jev-router recovery clear` removes them.
+too-many-requests error text, including token-throughput limits such as tokens
+per minute. Per-request token, context, and payload size limits never park a
+model. Set `rateLimit.enabled: false` to ignore rate-limit parks without
+affecting unavailable-model recovery. `/jev-router` lists saved parks that
+haven't expired, and `/jev-router recovery clear` removes parks and strikes.
 
 ## Free models
 

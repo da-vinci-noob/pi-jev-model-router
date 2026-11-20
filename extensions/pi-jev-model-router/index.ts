@@ -273,7 +273,7 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 function eligibilityFor(runtime: Runtime): TargetEligibility {
  return (target, model) => {
   const key = `${model.provider}/${model.id}`;
-  if ((runtime.config.recovery.enabled || runtime.config.rateLimit.enabled) && runtime.parking?.has(key)) {
+  if (runtime.parking?.has(key, Date.now(), runtime.config)) {
    return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
   }
   return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
@@ -737,10 +737,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; runtime.handledFailureKey = undefined; });
  pi.on("turn_end", async (event) => {
   runtime.failed = event as unknown as Runtime["failed"];
-  const settled = event as { message?: { role?: string; provider?: string; model?: string; stopReason?: string } };
-  if (settled.message?.role === "assistant" && settled.message.stopReason !== "error" &&
-      settled.message.provider && settled.message.model) {
-   runtime.parking?.clearStrikes(`${settled.message.provider}/${settled.message.model}`);
+  const message = event.message;
+  if (event.outcome === "completed" && message.role === "assistant") {
+   runtime.parking?.clearStrikes(`${message.provider}/${message.model}`);
   }
  });
  pi.on("agent_before_settle", async (event, ctx) => {
