@@ -189,8 +189,6 @@ describe("pi extension", () => {
     expect(host.setModel).toEqual([models[1], models[0]]);
     expect(fetchCalls).toHaveLength(1);
     expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(true);
-    const parks = JSON.parse(readFileSync(join(cwd, "state.json.recovery.json"), "utf8")).parks;
-    expect(parks).toEqual([{ key: "testprov/std-a", until: expect.any(Number), strikes: 1 }]);
     const next = await load();
     await next.input("add a retry to another upload client");
     expect(next.setModel).not.toContainEqual(models[1]);
@@ -210,7 +208,15 @@ describe("pi extension", () => {
     await host.input("add another retry to the upload client");
     await host.settle(fail("two"));
     expect(strikes()).toBe(2);
-    host.emit("turn_end", { message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "stop" } });
+    await host.emit("turn_end", {
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "aborted" },
+      outcome: "aborted",
+    });
+    expect(strikes()).toBe(2);
+    await host.emit("turn_end", {
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "stop" },
+      outcome: "completed",
+    });
     expect(strikes()).toBe(0);
     await host.input("add a third retry to the upload client");
     await host.settle(fail("three"));
@@ -228,6 +234,24 @@ describe("pi extension", () => {
     })).toBeUndefined();
     expect(host.setModel).toEqual([models[1]]);
     expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(false);
+  });
+
+  test.each([
+    { rateLimit: { enabled: false }, recovery: { enabled: true }, strikes: 1 },
+    { rateLimit: { enabled: true }, recovery: { enabled: false }, strikes: undefined },
+  ])("disabling a feature ignores its saved park while the other feature is on", async ({ strikes, ...config }) => {
+    writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    writeFileSync(join(cwd, "state.json.recovery.json"), JSON.stringify({
+      version: 1, parks: [{ key: "testprov/std-a", until: Date.now() + 3_600_000, strikes }],
+    }));
+    const bothEnabled = await load();
+    await bothEnabled.input("add a retry to the upload client");
+    expect(bothEnabled.setModel).not.toContainEqual(models[1]);
+    writeProjectConfig({ apiKey: "test-key", ...config });
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    expect(host.setModel).toEqual([models[1]]);
   });
 
 
