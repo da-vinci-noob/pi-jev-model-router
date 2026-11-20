@@ -11,6 +11,10 @@
     "enabled": false,
     "parkMs": 3600000
   },
+  "rateLimit": {
+    "enabled": true,
+    "parkMs": 86400000
+  },
   "budget": {
     "dailyUsd": 5,
     "monthlyUsd": 100,

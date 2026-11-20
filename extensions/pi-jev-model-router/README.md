@@ -84,7 +84,7 @@ export TYPESAFE_API_KEY=...
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, routes, kind specialists, last decision, recovery parks |
+| `/jev-router` | Status: mode, spend, routes, kind specialists, last decision, model parks |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
@@ -92,7 +92,7 @@ export TYPESAFE_API_KEY=...
 | `/jev-router quota` | Show the cached Codex reading: remaining per window, age, and the last refresh error |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the previous model if quota eligibility allows it |
-| `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
+| `/jev-router recovery clear` | Clear all persisted model parks (unavailable and rate-limited) |
 | `/jev-router suggest [--write]` | Propose routes from local scores; optionally save the generated config layer |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
 
@@ -225,10 +225,20 @@ that submission. Unsupported hosts leave the failure visible.
 
 Parks survive sessions and expire automatically. Inspect status and active parks
 with `/jev-router`; `/jev-router recovery clear` removes them immediately.
-429/5xx, authentication, context-limit, abort, and generic 404 failures do not
+5xx, authentication, context-limit, abort, and generic 404 failures do not
 park models or trigger recovery. There are no transient retries or `maxRetries`.
 See [Unavailable-model recovery](../../README.md#unavailable-model-recovery) for
 the complete boundaries and configuration.
+### Rate-limit parking
+
+Rate-limit parking is on by default. A 429 or rate/quota/usage-limit error parks
+the resolved provider/model, not the whole provider. Consecutive hits escalate the
+ban from 15 minutes through 1h, 4h and 12h to the 24-hour cap, and a successful
+turn on that model resets the streak. Configure with `"rateLimit": { "enabled":
+true, "parkMs": 86400000 }`, where `parkMs` is the maximum ban. See
+[Rate-limit parking](../../README.md#rate-limit-parking) for detection rules and
+boundaries.
+
 
 
 ## Tuning notes

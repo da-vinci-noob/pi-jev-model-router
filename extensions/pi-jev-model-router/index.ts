@@ -18,7 +18,7 @@ import { Type } from "typebox";
 import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary } from "./quota";
-import { isModelUnavailable, Parking } from "./recovery";
+import { isModelUnavailable, isRateLimited, Parking } from "./recovery";
 import {
   formatUsd,
   loadLedger,
@@ -62,6 +62,7 @@ interface Runtime {
   messageEntryId?: string; toolResults?: unknown[];
   message?: { role?: string; provider?: string; model?: string; stopReason?: string; errorMessage?: string };
  };
+ handledFailureKey?: string;
 }
 
 const ACK_PATTERN = /^(y|yes|yeah|yep|ok|okay|sure|continue|go on|go ahead|do it|proceed|nice|thanks|thank you|ty)[.!]?$/i;
@@ -272,7 +273,7 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 function eligibilityFor(runtime: Runtime): TargetEligibility {
  return (target, model) => {
   const key = `${model.provider}/${model.id}`;
-  if (runtime.config.recovery.enabled && runtime.parking?.has(key)) {
+  if ((runtime.config.recovery.enabled || runtime.config.rateLimit.enabled) && runtime.parking?.has(key)) {
    return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
   }
   return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
@@ -287,6 +288,14 @@ function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: str
  const result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
  for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
  return result.allowed;
+}
+
+function formatParkDuration(parkMs: number): string {
+  if (parkMs >= 60_000 && parkMs % 60_000 === 0) {
+    const minutes = parkMs / 60_000;
+    return minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`;
+  }
+  return `${parkMs}ms`;
 }
 
 /** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
@@ -660,6 +669,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.models = toAvailable(ctx);
   runtime.parking = new Parking(`${runtime.config.stateFile}.recovery.json`);
   runtime.recovery = undefined;
+  runtime.handledFailureKey = undefined;
     runtime.quota?.stop();
     runtime.quota = undefined;
     const quotaConfig = runtime.config.quota["openai-codex"];
@@ -724,28 +734,54 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  pi.on("tool_execution_start", async () => {
   if (runtime.recovery) runtime.recovery.toolsRan = true;
  });
- pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; });
+ pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; runtime.handledFailureKey = undefined; });
  pi.on("turn_end", async (event) => {
   runtime.failed = event as unknown as Runtime["failed"];
+  const settled = event as { message?: { role?: string; provider?: string; model?: string; stopReason?: string } };
+  if (settled.message?.role === "assistant" && settled.message.stopReason !== "error" &&
+      settled.message.provider && settled.message.model) {
+   runtime.parking?.clearStrikes(`${settled.message.provider}/${settled.message.model}`);
+  }
  });
  pi.on("agent_before_settle", async (event, ctx) => {
-  // Failed requests can bypass finishTurn; recover only at the final actionable boundary.
+  // Failed requests can bypass finishTurn; act only at the final actionable boundary.
   const boundary = { ...runtime.failed, ...event } as unknown as NonNullable<Runtime["failed"]> & {
    entries?: unknown[]; context?: { canContinue?: boolean };
   };
-  const state = runtime.recovery;
   const message = boundary.message;
-  if (!runtime.config.enabled || !runtime.config.recovery.enabled || !state ||
-   typeof boundary.messageEntryId !== "string" || !Array.isArray(boundary.entries) ||
-   !boundary.context || state.toolsRan || boundary.toolResults?.length ||
-   message?.role !== "assistant" || message.stopReason !== "error" ||
-   !message.provider || !message.model || !isModelUnavailable(message.errorMessage ?? "", message.model)) return;
+  if (!runtime.config.enabled || message?.role !== "assistant" || message.stopReason !== "error" ||
+   !message.provider || !message.model) return;
   const failedKey = `${message.provider}/${message.model}`;
-  if (!runtime.lastDecision || decisionModelKey(runtime.lastDecision) !== failedKey) return;
-  state.attempted.add(failedKey);
-  if (!runtime.parking?.park(failedKey, runtime.config.recovery.parkMs)) {
-   notify(ctx, "jev-router: model parked in memory, but recovery state could not be saved", "warning");
+  const errorText = message.errorMessage ?? "";
+  const withdrawn = runtime.config.recovery.enabled && isModelUnavailable(errorText, message.model);
+  const rateLimited = runtime.config.rateLimit.enabled && isRateLimited(errorText);
+  if (!withdrawn && !rateLimited) return;
+  if (runtime.handledFailureKey === failedKey) return;
+  runtime.handledFailureKey = failedKey;
+
+  let duration: string;
+  if (rateLimited) {
+    const appliedMs = runtime.parking?.rateLimit(failedKey, runtime.config.rateLimit.parkMs);
+    if (appliedMs === undefined) {
+     notify(ctx, "jev-router: model parked in memory, but recovery state could not be saved", "warning");
+    }
+    duration = formatParkDuration(appliedMs ?? runtime.config.rateLimit.parkMs);
+  } else {
+    if (!runtime.parking?.park(failedKey, runtime.config.recovery.parkMs)) {
+     notify(ctx, "jev-router: model parked in memory, but recovery state could not be saved", "warning");
+    }
+    duration = formatParkDuration(runtime.config.recovery.parkMs);
   }
+
+  const state = runtime.recovery;
+  if (!state || typeof boundary.messageEntryId !== "string" || !Array.isArray(boundary.entries) ||
+   !boundary.context || state.toolsRan || boundary.toolResults?.length ||
+   !runtime.lastDecision || decisionModelKey(runtime.lastDecision) !== failedKey) {
+   if (rateLimited) notify(ctx, `jev-router: ${failedKey} rate-limited; parked ${duration}; no safe reroute at this boundary`, "warning");
+   return;
+  }
+
+  state.attempted.add(failedKey);
   const ceiling = state.decision.tierIndex;
   const available = toAvailable(ctx).filter((model) => !state.attempted.has(`${model.provider}/${model.id}`));
   const free = runtime.config.free.enabled ? runtime.config.free.pool.filter((target) =>
@@ -758,12 +794,14 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
    })),
    ...(runtime.config.free.policy === "fallback-only" ? [{ tier: 0, targets: free }] : []),
   ];
+  const reason = rateLimited ? `${failedKey} rate-limited; rerouting` : `recovering unavailable model ${failedKey}`;
   for (const chain of chains) {
    const pick = firstAvailable(available, chain.targets, eligibilityFor(runtime));
    if (!pick) continue;
    const decision: Decision = {
     ...state.decision, ...pick, tier: TIERS[chain.tier], tierIndex: chain.tier,
-    held: false, reason: `recovering unavailable model ${failedKey}`, notes: [],
+    held: false, reason,
+    notes: rateLimited ? [`${failedKey} parked ${duration}`] : [],
    };
    // Recovery offers only accept/reject, so confirmation cannot escape the approved ceiling.
    if (runtime.config.mode === "notify") return;
@@ -784,12 +822,16 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
    notify(ctx, `jev-router: ${decision.reason}; continuing on ${decisionModelKey(decision)}`, "warning");
    return { entries: [...boundary.entries, { type: "context_edit", targetId: boundary.messageEntryId, replacement: null }], continue: true } as never;
   }
-  notify(ctx, "jev-router: unavailable model parked; no eligible recovery model remains. Failure left visible.", "warning");
+  notify(ctx, rateLimited
+   ? `jev-router: ${failedKey} rate-limited and parked ${duration}; no eligible model remains. Failure left visible.`
+   : "jev-router: unavailable model parked; no eligible recovery model remains. Failure left visible.", "warning");
  });
+
 
   // The routing hook: classify the prompt with Jev, then switch models in place.
   pi.on("input", async (event, ctx) => {
   runtime.recovery = undefined;
+  runtime.handledFailureKey = undefined;
     if (!runtime.config.enabled) return { action: "continue" };
     if (event.source === "extension") return { action: "continue" };
     if (event.images?.length && !event.text?.trim()) {
@@ -831,7 +873,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       }
       const applied = await applyDecision(analysis, decision, ctx, runtime);
       if (applied.blocked) return { action: "handled" };
-   if (runtime.config.recovery.enabled && ["kept", "switched", "rerouted"].includes(applied.action)) {
+   if ((runtime.config.recovery.enabled || runtime.config.rateLimit.enabled) && ["kept", "switched", "rerouted"].includes(applied.action)) {
     runtime.recovery = { decision: { ...decision, notes: [...decision.notes] }, analysis, attempted: new Set(), toolsRan: false };
    }
     } catch (error) {
@@ -850,9 +892,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       switch ((sub ?? "status").toLowerCase()) {
     case "recovery": {
      if (rest[0] === "clear") {
-      notify(ctx, runtime.parking?.clear() ? "jev-router: recovery parks cleared" : "jev-router: parks cleared in memory; state file could not be saved", "warning");
+      notify(ctx, runtime.parking?.clear() ? "jev-router: model parks cleared" : "jev-router: parks cleared in memory; state file could not be saved", "warning");
      } else {
-      notify(ctx, [`recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`, ...(runtime.parking?.list() ?? [])].join("\n"), "info");
+      notify(ctx, [`recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`, `rate limits: ${runtime.config.rateLimit.enabled ? "on" : "off"}`, ...(runtime.parking?.list() ?? [])].join("\n"), "info");
      }
      return;
     }
@@ -1022,6 +1064,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
        restored: runtime.quota?.restored,
       }),
       `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
+      `rate limits: ${runtime.config.rateLimit.enabled ? "on" : "off"}`,
       ...(runtime.parking?.list() ?? []),
             `cache-aware: ${runtime.config.cache.aware ? `on (cap ${formatUsd(runtime.config.cache.maxPenaltyUsd)}, deadband ${runtime.config.cache.deadband})` : "off"}`,
             `built-in models: ${runtime.config.useDefaultModels ? "on" : "off (config-only)"}`,

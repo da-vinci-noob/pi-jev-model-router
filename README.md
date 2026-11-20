@@ -120,7 +120,7 @@ disabled. No configuration is required — sensible defaults are built in.
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, recovery parks |
+| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, model parks |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
@@ -128,7 +128,7 @@ disabled. No configuration is required — sensible defaults are built in.
 | `/jev-router quota` | Show the cached Codex reading: remaining per window, reset countdown, age, and the last refresh error |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
-| `/jev-router recovery clear` | Clear all persisted unavailable-model parks |
+| `/jev-router recovery clear` | Clear all persisted model parks (unavailable and rate-limited) |
 | `/jev-router suggest` | Rank your scored models into proposed `routes` / `kindModels` and print them (see [Ranking models from your own scores](#ranking-models-from-your-own-scores)) |
 | `/jev-router suggest --write` | Same, and save it as a generated config layer that your own config overrides |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
@@ -712,8 +712,9 @@ Recovery is **off by default**. Opt in explicitly:
 `parkMs` is a finite positive duration in milliseconds (default: one hour).
 Only a confirmed **model-specific unavailable** error triggers recovery: for
 example, an explicit model-not-found or model-retired response. HTTP status alone
-is insufficient. Rate limits (429), server errors (5xx), authentication failures,
-context limits, aborts, and generic 404s do not park models or trigger retries.
+is insufficient. Server errors (5xx), authentication failures, context limits,
+aborts, and generic 404s do not park models or trigger retries. Rate limits are
+handled by the separate [Rate-limit parking](#rate-limit-parking) feature.
 This is not transient-error retry support; there is no `maxRetries` setting.
 
 On a supported host, the router captures the failed entry at `turn_end` and
@@ -732,6 +733,34 @@ Parks persist in `<stateFile>.recovery.json` across sessions and expire after
 recovery status and active parks with `/jev-router`, or remove them immediately
 with `/jev-router recovery clear`. Disabling recovery leaves ordinary routing
 unchanged.
+
+## Rate-limit parking
+
+Rate-limit parking is **on by default** and independent of model recovery:
+
+```json
+{
+  "rateLimit": {
+    "enabled": true,
+    "parkMs": 86400000
+  }
+}
+```
+
+`parkMs` is the maximum ban, a finite positive duration in milliseconds (default:
+24 hours). A rate-limit failure parks the **resolved provider/model only**, so a
+per-model limit never bans the whole provider. Consecutive hits on the same model
+escalate the ban: 15 minutes, 1 hour, 4 hours, 12 hours, then the `parkMs` cap. The
+streak is stored with the parks in `<stateFile>.recovery.json` and survives
+restarts. A successful assistant turn on that model clears the streak, so a model
+that recovers starts again at 15 minutes.
+
+The boundaries match recovery: detection at `turn_end`, reroute at
+`agent_before_settle`, one Jev call, no replay after a tool has run. A rate limit
+is recognized from HTTP 429 and from rate-limit, quota, usage-limit, and
+too-many-requests error text. Token, context, and payload size limits are capacity
+errors, not rate limits, and never park a model. Set `enabled: false` to disable;
+`/jev-router` lists active parks and `/jev-router recovery clear` removes them.
 
 ## Free models
 
@@ -799,6 +828,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `confirm` | `tiers: ["xpremium"]`, `timeoutMs: 10000`, `onTimeout: "accept"` | Ask before switching into these tiers; `0` forces the free pool, `1` to `5` jump to a tier |
 | `quota` | disabled | Cached Codex 5h/weekly remaining-quota floors, independent of spend |
 | `recovery` | `enabled: false`, `parkMs: 3600000` | Opt-in confirmed unavailable-model recovery and persistent resolved-model parking |
+| `rateLimit` | `enabled: true`, `parkMs: 86400000` | Per-model rate-limit parking with escalating 15m/1h/4h/12h/24h bans |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger; Codex readings persist beside it as `pi-jev-model-router-state.json.quota.json` |

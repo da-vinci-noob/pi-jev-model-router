@@ -175,12 +175,68 @@ describe("pi extension", () => {
     expect(host.setModel).toEqual([models[1]]);
   });
 
+  test("a rate-limited model is parked with an escalating ban and the turn reroutes without a second Jev call", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    const failure = {
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "429 rate limit exceeded" },
+      messageEntryId: "failed-entry", entries: [], context: { canContinue: true }, toolResults: [],
+    };
+    expect(await host.settle(failure)).toEqual({
+      entries: [{ type: "context_edit", targetId: "failed-entry", replacement: null }], continue: true,
+    });
+    expect(host.setModel).toEqual([models[1], models[0]]);
+    expect(fetchCalls).toHaveLength(1);
+    expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(true);
+    const parks = JSON.parse(readFileSync(join(cwd, "state.json.recovery.json"), "utf8")).parks;
+    expect(parks).toEqual([{ key: "testprov/std-a", until: expect.any(Number), strikes: 1 }]);
+    const next = await load();
+    await next.input("add a retry to another upload client");
+    expect(next.setModel).not.toContainEqual(models[1]);
+  });
+
+  test("repeated rate limits escalate the ban and a successful turn resets it", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    const fail = (entry: string) => ({
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "429 rate limit exceeded" },
+      messageEntryId: entry, entries: [], context: { canContinue: true }, toolResults: [],
+    });
+    const strikes = () => JSON.parse(readFileSync(join(cwd, "state.json.recovery.json"), "utf8")).parks[0].strikes;
+    await host.input("add a retry to the upload client");
+    await host.settle(fail("one"));
+    expect(strikes()).toBe(1);
+    await host.input("add another retry to the upload client");
+    await host.settle(fail("two"));
+    expect(strikes()).toBe(2);
+    host.emit("turn_end", { message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "stop" } });
+    expect(strikes()).toBe(0);
+    await host.input("add a third retry to the upload client");
+    await host.settle(fail("three"));
+    expect(strikes()).toBe(1);
+  });
+
+  test("rate-limit parking can be disabled without affecting ordinary routing", async () => {
+    writeProjectConfig({ apiKey: "test-key", rateLimit: { enabled: false } });
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const host = await load();
+    await host.input("add a retry to the upload client");
+    expect(await host.settle({
+      message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage: "429 rate limit exceeded" },
+      messageEntryId: "failed-entry", entries: [], context: { canContinue: true }, toolResults: [],
+    })).toBeUndefined();
+    expect(host.setModel).toEqual([models[1]]);
+    expect(existsSync(join(cwd, "state.json.recovery.json"))).toBe(false);
+  });
+
+
   test("legacy host boundary and ordinary errors leave the failure visible", async () => {
     writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
     stubFetch(() => Response.json(jevAnswers("implement", 1)));
     const host = await load();
     await host.input("add a retry to the upload client");
-    for (const errorMessage of ["404 Not Found", "429 model std-a unavailable", "model_not_found: std-a"]) {
+    for (const errorMessage of ["404 Not Found", "500 model std-a unavailable", "model_not_found: std-a"]) {
       expect(await host.settle({
         message: { role: "assistant", provider: "testprov", model: "std-a", stopReason: "error", errorMessage }, toolResults: [],
       })).toBeUndefined();
