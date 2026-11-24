@@ -38,6 +38,7 @@ import {
   describeDecision,
   firstAvailable,
  kindCandidates,
+  maxTierIndex,
   tierIndex,
   tierForModel,
   type AvailableModel,
@@ -264,6 +265,8 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   }
   const tier = runtime.appliedTierIndex !== undefined ? TIERS[runtime.appliedTierIndex] : "on";
   const parts = [`jev-router:${tier}`];
+  const ceiling = runtime.config.maxTier;
+  if (ceiling !== undefined && ceiling !== "xpremium") parts.push(`max ${ceiling}`);
   if (spend.today > 0) parts.push(formatUsd(spend.today));
   if (spend.pressure > 0) parts.push(`${Math.round(spend.pressure * 100)}%`);
   if (runtime.config.mode !== "auto") parts.push(runtime.config.mode);
@@ -452,7 +455,11 @@ async function applyDecision(
   const targetKey = decision.model ? `${decision.model.provider}/${decision.model.id}` : undefined;
   const keepCurrent =
     decision.held === true ||
-    (runtime.config.stickiness && targetKey !== undefined && currentKey === targetKey);
+    (runtime.config.stickiness &&
+      targetKey !== undefined &&
+      currentKey === targetKey &&
+      // A ceiling can make the current model unreachable; do not keep it.
+      decision.tierIndex <= maxTierIndex(runtime.config));
 
   if (keepCurrent) {
     if (!eligibleTarget(decision.target, decision.model!, eligibilityFor(runtime), decision.notes)) {
@@ -701,6 +708,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           "warning",
         );
       }
+    }
+    if (runtime.config.warnings?.length) {
+      notify(ctx, `pi-jev-model-router: ${runtime.config.warnings.join(" ")}`, "warning");
     }
   });
 

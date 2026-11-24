@@ -2,6 +2,7 @@
   "enabled": true,
   "mode": "auto",
   "useDefaultModels": true,
+  "maxTier": "xpremium",
   "minPromptChars": 12,
   "historyTurns": 4,
   "timeoutMs": 3500,
