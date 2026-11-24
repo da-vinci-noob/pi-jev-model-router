@@ -402,6 +402,10 @@ describe("quota config", () => {
     writeProject({ quota: { "openai-codex": { enabled: false, cacheTtlSec: 0, onUnknown: "maybe", minQuota: { weekly: 2, fiveHour: "0.1" } } } });
     expect(loadConfig(cwd).quota["openai-codex"]).toEqual({ enabled: false, cacheTtlSec: 120, onUnknown: "use", minQuota: {} });
   });
+  test("zai quota merges with the same safe defaults and a 5h floor", () => {
+    writeProject({ quota: { zai: { cacheTtlSec: 30, onUnknown: "skip", minQuota: { fiveHour: 0.1 } } } });
+    expect(loadConfig(cwd).quota.zai).toEqual({ enabled: true, cacheTtlSec: 30, onUnknown: "skip", minQuota: { fiveHour: 0.1 } });
+  });
 });
 
 describe("confirm gate config", () => {

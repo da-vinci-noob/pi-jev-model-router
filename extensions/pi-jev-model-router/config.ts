@@ -49,6 +49,18 @@ export interface CodexQuotaConfig {
   minQuota: QuotaFloors;
 }
 
+/** Z.AI coding-plan quota. Only the 5h token window is reported and gated. */
+export interface ZaiQuotaConfig {
+  enabled: boolean;
+  cacheTtlSec: number;
+  onUnknown: "use" | "skip";
+  /**
+   * Floor for the shared 5h session window (unit 3). The lite plan reports no
+   * weekly token window, so `weekly` is accepted but ignored by the reader.
+   */
+  minQuota: QuotaFloors;
+}
+
 /** Approval guard for switches into an expensive tier. */
 export interface ConfirmConfig {
   /**
@@ -191,7 +203,7 @@ export interface JevRouterConfig {
   taskKinds: Record<string, string>;
   ranking: RankingConfig;
   confirm: ConfirmConfig;
-  quota: { "openai-codex"?: CodexQuotaConfig };
+  quota: { "openai-codex"?: CodexQuotaConfig; zai?: ZaiQuotaConfig };
   recovery: { enabled: boolean; parkMs: number };
   rateLimit: RateLimitConfig;
   /**
@@ -500,6 +512,18 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     const patch = asRecord(rawCodex);
     const previous = quota["openai-codex"];
     quota["openai-codex"] = {
+      enabled: typeof patch.enabled === "boolean" ? patch.enabled : previous?.enabled ?? true,
+      cacheTtlSec: typeof patch.cacheTtlSec === "number" && Number.isFinite(patch.cacheTtlSec) && patch.cacheTtlSec >= 1 && patch.cacheTtlSec <= 86400
+        ? patch.cacheTtlSec : previous?.cacheTtlSec ?? 120,
+      onUnknown: patch.onUnknown === "use" || patch.onUnknown === "skip" ? patch.onUnknown : previous?.onUnknown ?? "use",
+      minQuota: { ...previous?.minQuota, ...normalizeQuotaFloors(patch.minQuota) },
+    };
+  }
+  const rawZai = asRecord(p.quota)["zai"];
+  if (rawZai && typeof rawZai === "object" && !Array.isArray(rawZai)) {
+    const patch = asRecord(rawZai);
+    const previous = quota["zai"];
+    quota["zai"] = {
       enabled: typeof patch.enabled === "boolean" ? patch.enabled : previous?.enabled ?? true,
       cacheTtlSec: typeof patch.cacheTtlSec === "number" && Number.isFinite(patch.cacheTtlSec) && patch.cacheTtlSec >= 1 && patch.cacheTtlSec <= 86400
         ? patch.cacheTtlSec : previous?.cacheTtlSec ?? 120,

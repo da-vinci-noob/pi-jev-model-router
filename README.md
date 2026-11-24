@@ -731,6 +731,30 @@ This reduces the risk of mid-flight cancellation; it cannot reserve quota or
 predict how much a long-running turn will consume. Model-scoped quotas, generic
 HTTP adapters, and turn-dependent floors are deliberately deferred.
 
+## Z.AI quota guards
+
+The Z.AI coding plan has a 5 hour token window shared across GLM models. Opt in
+the same way as the Codex guard:
+
+```json
+{
+  "quota": {
+    "zai": {
+      "cacheTtlSec": 120,
+      "onUnknown": "use",
+      "minQuota": { "fiveHour": 0.10 }
+    }
+  }
+}
+```
+
+Only `fiveHour` is read. The lite plan reports no weekly token window, and its
+monthly entry is a time limit, not a token quota. A `zai` target whose 5h
+remaining falls below the floor is skipped and the next candidate is tried.
+Readings refresh in the background using Pi's z.ai credentials, and `onUnknown`
+decides a missing or stale reading exactly as it does for Codex. `/jev-router
+quota` and `/jev-router status` show the z.ai reading beside the Codex one.
+
 ## Unavailable-model recovery
 
 Recovery is **off by default**. Opt in explicitly:
