@@ -379,8 +379,14 @@ function normalizeExpiresAt(value: unknown): string | number | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/** A chain block may be written as one entry or as a list. */
+function asList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  return value && typeof value === "object" ? [value] : [];
+}
+
 function normalizeChain(value: unknown): RouteChain | undefined {
-  const list = Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
+  const list = asList(value);
   const targets = list.filter(
     (item): item is RouteTarget =>
       Boolean(item) && typeof item === "object" && typeof (item as RouteTarget).provider === "string" && typeof (item as RouteTarget).model === "string",
@@ -392,6 +398,13 @@ function normalizeChain(value: unknown): RouteChain | undefined {
     minQuota: t.minQuota === undefined ? undefined : normalizeQuotaFloors(t.minQuota),
     expiresAt: t.expiresAt === undefined ? undefined : normalizeExpiresAt(t.expiresAt),
   }));
+}
+
+/** A configured scores file: a bare path, or `~` for the home directory. */
+function resolveScoresFile(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  if (value === "~" || value.startsWith("~/")) return join(homedir(), value.slice(1));
+  return value;
 }
 
 function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
@@ -428,14 +441,9 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     if (key in cutoffs && typeof value === "number" && Number.isFinite(value)) cutoffs[key as keyof typeof cutoffs] = value;
   }
   if (!(cutoffs.standard <= cutoffs.high && cutoffs.high <= cutoffs.premium)) cutoffs = base.ranking.cutoffs;
-  const scoresFile = rankingPatch.scoresFile;
+  const scoresFile = resolveScoresFile(rankingPatch.scoresFile, base.ranking.scoresFile);
   const ranking: RankingConfig = {
-    scoresFile:
-      typeof scoresFile !== "string"
-        ? base.ranking.scoresFile
-        : scoresFile === "~" || scoresFile.startsWith("~/")
-          ? join(homedir(), scoresFile.slice(1))
-          : scoresFile,
+    scoresFile,
     cutoffs,
     spreadProviders:
       typeof rankingPatch.spreadProviders === "boolean" ? rankingPatch.spreadProviders : base.ranking.spreadProviders,
