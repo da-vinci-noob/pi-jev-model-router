@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary } from "./quota";
 import { isModelUnavailable, isRateLimited, Parking } from "./recovery";
@@ -31,6 +31,8 @@ import {
 import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
 import {
   decide,
+  deadlineNote,
+  deadlineState,
   eligibleTarget,
   isTargetExpired,
   targetForModel,
@@ -275,7 +277,7 @@ function eligibilityFor(runtime: Runtime): TargetEligibility {
   return (target, model) => {
     const key = `${model.provider}/${model.id}`;
     if (isTargetExpired(target)) {
-      return { allowed: false, notes: [`${key} skipped: expired ${String(target.expiresAt)}`] };
+      return { allowed: false, notes: [deadlineNote(target, key)] };
     }
     if (runtime.parking?.has(key, Date.now(), runtime.config)) {
       return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
@@ -284,18 +286,29 @@ function eligibilityFor(runtime: Runtime): TargetEligibility {
   };
 }
 
-function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
-  if (!ctx.model) return true;
+/** The target currently in force, resolved through the last decision when it matches. */
+function currentTarget(
+  ctx: ExtensionContext,
+  runtime: Runtime,
+): { target: RouteTarget; key: string; provider: string } | undefined {
+  if (!ctx.model) return undefined;
   const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
-  const target = runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
-    ? runtime.lastDecision.target : targetForModel(runtime.config, model);
-  const key = `${model.provider}/${model.id}`;
-  if (isTargetExpired(target)) {
-    const note = `${key} skipped: expired ${String(target.expiresAt)}`;
+  const target =
+    runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
+      ? runtime.lastDecision.target
+      : targetForModel(runtime.config, model);
+  return { target, key: `${model.provider}/${model.id}`, provider: model.provider };
+}
+
+function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
+  const current = currentTarget(ctx, runtime);
+  if (!current) return true;
+  if (isTargetExpired(current.target)) {
+    const note = deadlineNote(current.target, current.key);
     if (!notes.includes(note)) notes.push(note);
     return false;
   }
-  const result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  const result = quotaEligibility(current.target, current.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
   for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
   return result.allowed;
 }
@@ -317,7 +330,13 @@ function expiredTargetNotes(config: JevRouterConfig): string[] {
       const key = `${target.provider}/${target.model}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      notes.push(`${key} expired ${String(target.expiresAt)}`);
+      // An unreadable deadline is reported as such: the target is unroutable and the
+      // user needs to see why, not just that it vanished from the chains.
+      notes.push(
+        deadlineState(target) === "invalid"
+          ? `${key} has an invalid expiresAt ${String(target.expiresAt)}; it is treated as expired`
+          : `${key} expired ${String(target.expiresAt)}`,
+      );
     }
   };
   for (const tier of TIERS) check(config.routes[tier]);
@@ -329,7 +348,17 @@ function expiredTargetNotes(config: JevRouterConfig): string[] {
 /** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
 function quotaBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
   if (currentQuotaAllowed(ctx, runtime, notes)) return false;
-  notify(ctx, `jev-router: prompt not sent; current model is quota-ineligible. Choose another model or retry after quota refresh.\n${notes.join("\n")}`, "warning");
+  const key = currentModelKey(ctx) ?? "current model";
+  const target = currentTarget(ctx, runtime)?.target;
+  const state = target ? deadlineState(target) : "none";
+  // An expired target is not a quota problem: retrying after a refresh cannot help.
+  const reason =
+    state === "expired"
+      ? `${key} expired ${String(target?.expiresAt)} and no eligible fallback is available. Choose another model.`
+      : state === "invalid"
+        ? `${key} has an invalid expiresAt ${String(target?.expiresAt)}, so it is treated as expired, and no eligible fallback is available. Choose another model.`
+        : "current model is quota-ineligible. Choose another model or retry after quota refresh.";
+  notify(ctx, `jev-router: prompt not sent; ${reason}\n${notes.join("\n")}`, "warning");
   return true;
 }
 

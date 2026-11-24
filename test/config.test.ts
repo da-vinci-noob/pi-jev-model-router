@@ -424,21 +424,31 @@ describe("time-limited model targets", () => {
     expect(loadConfig(cwd).routes.quick[0].expiresAt).toBe(1796083200000);
   });
 
-  test("drops invalid expiresAt values without dropping the target", () => {
+  test("keeps an unreadable expiresAt verbatim so the restriction is never dropped", () => {
     writeProject({
       routes: {
         quick: [
           { provider: "testprov", model: "model-a", expiresAt: "next week" },
           { provider: "testprov", model: "model-b", expiresAt: -1 },
           { provider: "testprov", model: "model-c", expiresAt: "2026-13-01T00:00:00Z" },
-          { provider: "testprov", model: "model-d", expiresAt: Number.NaN },
+          { provider: "testprov", model: "model-d", expiresAt: "2026-02-30T00:00:00Z" },
           { provider: "testprov", model: "model-e", expiresAt: "" },
         ],
       },
     });
     const quick = loadConfig(cwd).routes.quick;
     expect(quick.map((t) => t.model)).toEqual(["model-a", "model-b", "model-c", "model-d", "model-e"]);
-    for (const target of quick) expect(target.expiresAt).toBeUndefined();
+    expect(quick[0].expiresAt).toBe("next week");
+    expect(quick[1].expiresAt).toBe(-1);
+    expect(quick[2].expiresAt).toBe("2026-13-01T00:00:00Z");
+    expect(quick[3].expiresAt).toBe("2026-02-30T00:00:00Z");
+    // An empty value declares no deadline at all.
+    expect(quick[4].expiresAt).toBeUndefined();
+  });
+
+  test("trims a valid ISO deadline", () => {
+    writeProject({ routes: { quick: [{ provider: "testprov", model: "model-a", expiresAt: " 2026-12-01T00:00:00Z " }] } });
+    expect(loadConfig(cwd).routes.quick[0].expiresAt).toBe("2026-12-01T00:00:00Z");
   });
 
   test("preserves expiresAt in kindModels and free pool", () => {

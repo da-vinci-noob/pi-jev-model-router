@@ -367,17 +367,16 @@ export function normalizeQuotaFloors(value: unknown): QuotaFloors {
   return floors;
 }
 
-const ISO_TZ_RE = /(Z|[+-]\d{2}:?\d{2})$/i;
-
+/**
+ * Keep a declared deadline as written. The value is validated where it is used,
+ * because a deadline the router cannot read has to fail closed: dropping it would
+ * leave the target unrestricted, which is the opposite of the intent.
+ */
 function normalizeExpiresAt(value: unknown): string | number | undefined {
-  if (typeof value === "number") {
-    return Number.isFinite(value) && value >= 0 ? value : undefined;
-  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
-  if (!trimmed || !ISO_TZ_RE.test(trimmed)) return undefined;
-  const ms = Date.parse(trimmed);
-  return Number.isFinite(ms) ? trimmed : undefined;
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function normalizeChain(value: unknown): RouteChain | undefined {

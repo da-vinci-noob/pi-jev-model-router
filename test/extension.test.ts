@@ -139,6 +139,25 @@ afterEach(async () => {
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 describe("pi extension", () => {
+  test("an expired current model reports expiry instead of a quota retry", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      routes: {
+        quick: [{ provider: "testprov", model: "quick-a", expiresAt: "2020-01-01T00:00:00Z" }],
+        standard: [],
+        high: [],
+        premium: [],
+      },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    expect(await host.input("plan a migration for the upload client")).toEqual({ action: "handled" });
+    const blocked = host.notes.map(([text]) => text).find((text) => text.includes("prompt not sent"));
+    expect(blocked).toBeDefined();
+    expect(blocked).toContain("expired");
+    expect(blocked).not.toContain("quota-ineligible");
+  });
+
   test("recovers an unavailable model without a second classification and persists its park", async () => {
     writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
     stubFetch(() => Response.json(jevAnswers("implement", 1)));
