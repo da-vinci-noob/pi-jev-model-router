@@ -211,6 +211,13 @@ without waiving other known below-floor windows.
 error. See [Codex quota guards](../../README.md#codex-quota-guards) for
 configuration, reset handling, submission protection, and limitations.
 
+### Z.AI quota protection
+
+Opt in with `"quota": { "zai": { "cacheTtlSec": 120, "onUnknown": "use", "minQuota": { "fiveHour": 0.10 } } }`.
+Only the 5h token window is read; the lite plan has no weekly token window. A
+gated `zai` target is skipped when the 5h remaining drops below the floor, and
+the next candidate is tried. See [Z.AI quota guards](../../README.md#zai-quota-guards).
+
 ### Unavailable-model recovery
 
 Opt in with `"recovery": { "enabled": true, "parkMs": 3600000 }`.
