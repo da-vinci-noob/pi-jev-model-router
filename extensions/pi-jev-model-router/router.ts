@@ -81,7 +81,12 @@ export function firstAvailable(
 ): { target: RouteTarget; model: AvailableModel } | undefined {
   for (const target of chain) {
     const model = findModel(models, target);
-    if (model && eligibleTarget(target, model, eligibility, notes)) return { target, model };
+    if (!model) {
+      const note = `${target.provider}/${target.model} skipped: not in the model catalogue`;
+      if (notes && !notes.includes(note)) notes.push(note);
+      continue;
+    }
+    if (eligibleTarget(target, model, eligibility, notes)) return { target, model };
   }
   return undefined;
 }
@@ -282,16 +287,28 @@ export function decide(
     ? config.free.pool.filter((t) => options.models.some((m) => m.provider === t.provider && m.id === t.model))
     : [];
   const kindChain = kindCandidates(config, analysis.kind, index);
-  const ordered: RouteTarget[] = [];
-  if (config.free.policy === "prefer") ordered.push(...freePool);
-  ordered.push(...kindChain, ...config.routes[TIERS[index]]);
+  const chains = [
+    ...(config.free.policy === "prefer" ? [{ targets: freePool, source: "pool" as const }] : []),
+    { targets: kindChain, source: "kind" as const },
+    { targets: config.routes[TIERS[index]], source: index },
+  ];
   for (let offset = 1; offset < tierCount; offset += 1) {
-    if (index - offset >= 0) ordered.push(...config.routes[TIERS[index - offset]]);
-    if (index + offset < tierCount) ordered.push(...config.routes[TIERS[index + offset]]);
+    const lower = index - offset;
+    const higher = index + offset;
+    if (lower >= 0) chains.push({ targets: config.routes[TIERS[lower]], source: lower });
+    if (higher < tierCount) chains.push({ targets: config.routes[TIERS[higher]], source: higher });
   }
-  if (config.free.policy === "fallback-only") ordered.push(...freePool);
+  if (config.free.policy === "fallback-only") chains.push({ targets: freePool, source: "pool" });
 
-  const available = firstAvailable(options.models, ordered, options.eligibility, notes);
+  let available: { target: RouteTarget; model: AvailableModel } | undefined;
+  let source: (typeof chains)[number]["source"] = index;
+  for (const chain of chains) {
+    available = firstAvailable(options.models, chain.targets, options.eligibility, notes);
+    if (available) {
+      source = chain.source;
+      break;
+    }
+  }
   if (!available) return undefined;
 
   const currentIndex = options.current?.index;
@@ -304,21 +321,7 @@ export function decide(
     notes.push(`current ${TIERS[currentIndex]} sits above ceiling ${TIERS[ceiling]} → ${TIERS[index]}`);
   }
 
-  const usedKindChain = kindChain.some(
-    (t) => t.provider === available.target.provider && t.model === available.target.model,
-  );
-  if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
-    notes.push(`free pool → ${available.model.id}`);
-  }
-  const servingTiers = usedKindChain
-    ? []
-    : TIERS.slice(0, tierCount).map((_, i) => i).filter((i) =>
-        config.routes[TIERS[i]].some(
-          (t) => t.provider === available.target.provider && t.model === available.target.model,
-        ),
-      );
-  const effectiveIndex =
-    servingTiers.sort((a, b) => Math.abs(a - index) - Math.abs(b - index) || a - b)[0] ?? index;
+  const effectiveIndex = typeof source === "number" ? source : index;
   if (effectiveIndex !== index) {
     notes.push(`${TIERS[index]} chain unavailable → ${TIERS[effectiveIndex]}`);
     downgraded = effectiveIndex < index;
@@ -382,6 +385,8 @@ export function decide(
     }
   }
 
+  if (source === "pool") notes.push(`free pool → ${available.model.id}`);
+
   const reason =
     `${analysis.kind} · complexity ${analysis.complexity.toFixed(2)}/3 · ` +
     `capability ${analysis.budgetIntensity.toFixed(2)}/3 · reasoning ${analysis.deepReasoning.toFixed(2)}` +
@@ -397,7 +402,7 @@ export function decide(
     budgetPressure: spend.pressure,
     downgraded,
     lowConfidenceFallback,
-    kindSpecialised: usedKindChain,
+    kindSpecialised: source === "kind",
     reason,
     notes,
   };

@@ -774,6 +774,30 @@ This reduces the risk of mid-flight cancellation; it cannot reserve quota or
 predict how much a long-running turn will consume. Model-scoped quotas, generic
 HTTP adapters, and turn-dependent floors are deliberately deferred.
 
+## Z.AI quota guards
+
+The Z.AI coding plan has a 5 hour token window shared across GLM models. Opt in
+the same way as the Codex guard:
+
+```json
+{
+  "quota": {
+    "zai": {
+      "cacheTtlSec": 120,
+      "onUnknown": "use",
+      "minQuota": { "fiveHour": 0.10 }
+    }
+  }
+}
+```
+
+Only `fiveHour` is read. The lite plan reports no weekly token window, and its
+monthly entry is a time limit, not a token quota. A `zai` target whose 5h
+remaining falls below the floor is skipped and the next candidate is tried.
+Readings refresh in the background using Pi's z.ai credentials, and `onUnknown`
+decides a missing or stale reading exactly as it does for Codex. `/jev-router
+quota` and `/jev-router status` show the z.ai reading beside the Codex one.
+
 ## Unavailable-model recovery
 
 Recovery is **off by default**. Opt in explicitly:
@@ -867,10 +891,10 @@ the judgment is untouched and a free model never has to pretend to be a tier.
 
 Pool entries match on provider and model exactly, so a missing free model never
 falls back to a paid model with the same ID. The first pool entry in the model
-catalogue wins; one that is missing falls through to the normal chains. When a pool
-model wins, the decision still reports the tier Jev judged, plus a
-`free pool → <model>` note, so the transcript shows why the tier and the model
-differ.
+catalogue that passes eligibility wins; missing or ineligible entries fall through.
+The `free pool → <model>` note means the pool produced the final routing decision.
+It is omitted when a kind or tier entry wins instead, or when the cache guard
+keeps the current model.
 
 A pool model is not on any tier, so `tierForModel` reports no tier for it and the
 status line falls back to `jev-router:on`. That is deliberate: a free model has no
