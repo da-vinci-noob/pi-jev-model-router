@@ -158,6 +158,23 @@ describe("pi extension", () => {
     expect(blocked).not.toContain("quota-ineligible");
   });
 
+  test("status reports an unreadable deadline as unroutable", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      routes: {
+        quick: [],
+        standard: [{ provider: "testprov", model: "std-a", expiresAt: "2026-02-30T00:00:00Z" }],
+        high: [],
+        premium: [],
+      },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    await host.command("jev-router", "status");
+    const status = host.notes.at(-1)?.[0] ?? "";
+    expect(status).toContain("testprov/std-a has an invalid expiresAt 2026-02-30T00:00:00Z; it is treated as expired");
+  });
+
   test("recovers an unavailable model without a second classification and persists its park", async () => {
     writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
     stubFetch(() => Response.json(jevAnswers("implement", 1)));
