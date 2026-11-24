@@ -789,10 +789,11 @@ the judgment is untouched and a free model never has to pretend to be a tier.
 
 Pool entries match on provider and model exactly, so a missing free model never
 falls back to a paid model with the same ID. The first pool entry in the model
-catalogue wins; one that is missing falls through to the normal chains. When a pool
-model wins, the decision still reports the tier Jev judged, plus a
-`free pool → <model>` note, so the transcript shows why the tier and the model
-differ.
+catalogue wins; one that is missing falls through to the normal chains. When the
+pool itself produces the winner, the decision still reports the tier Jev judged,
+plus a `free pool → <model>` note, so the transcript shows why the tier and the
+model differ. The note is omitted when a free model that also appears in a kind
+or tier chain wins from that chain instead.
 
 A pool model is not on any tier, so `tierForModel` reports no tier for it and the
 status line falls back to `jev-router:on`. That is deliberate: a free model has no

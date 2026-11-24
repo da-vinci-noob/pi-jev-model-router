@@ -315,6 +315,22 @@ describe("decide: free pool", () => {
     expect(d.model).toBe(p1);
     expect(decide(analysis(), config({ free: { ...free, policy: "fallback-only" } }), options({ models: [impostor] }))).toBeUndefined();
   });
+
+  test("a free model duplicated in a kind chain is not reported as a pool hit", () => {
+    const free = { enabled: true, policy: "fallback-only" as const, pool };
+    const kindFree: RouteTarget = { provider: "freeprov", model: "free-a", minTier: "quick", priority: 10 };
+    const d = run({ kind: "chat" }, { free, kindModels: { chat: [kindFree] } }, { models });
+    expect(d.model).toBe(freeModel);
+    expect(d.kindSpecialised).toBe(true);
+    expect(d.notes).not.toContain("free pool → free-a");
+  });
+
+  test("a pool-only fallback still reports the pool hit", () => {
+    const free = { enabled: true, policy: "fallback-only" as const, pool };
+    const d = run({}, { free }, { models: [freeModel] });
+    expect(d.model).toBe(freeModel);
+    expect(d.notes).toContain("free pool → free-a");
+  });
 });
 
 describe("decide: cache guard", () => {

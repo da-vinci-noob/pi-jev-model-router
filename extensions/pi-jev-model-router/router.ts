@@ -280,8 +280,20 @@ export function decide(
   const usedKindChain = kindChain.some(
     (t) => t.provider === available.target.provider && t.model === available.target.model,
   );
-  if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
-    notes.push(`free pool → ${available.model.id}`);
+  // "free pool →" must mean the pool produced the winner, not that the winning
+  // model also appears in the pool. Under fallback-only a free model duplicated
+  // in a kind or tier chain wins from that earlier chain, so label it a pool hit
+  // only when its first position in the candidate order sits inside the pool
+  // segment.
+  const winnerIsPoolMember = freePool.some(
+    (t) => t.provider === available.target.provider && t.model === available.target.model,
+  );
+  if (winnerIsPoolMember) {
+    const poolStart = config.free.policy === "prefer" ? 0 : ordered.length - freePool.length;
+    const firstHit = ordered.findIndex(
+      (t) => t.provider === available.target.provider && t.model === available.target.model,
+    );
+    if (firstHit >= poolStart) notes.push(`free pool → ${available.model.id}`);
   }
   const servingTiers = usedKindChain
     ? []
