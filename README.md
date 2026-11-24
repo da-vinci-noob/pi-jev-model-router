@@ -114,7 +114,9 @@ implement · complexity 1.70/3 · capability 1.55/3 · reasoning 0.82 → high
 ```
 
 The status bar shows `jev-router:<tier> · $spend · %cap`, or `jev-router:off` when
-disabled. No configuration is required — sensible defaults are built in.
+disabled. When a [tier ceiling](#tier-ceiling) is in force the line says so, for
+example `jev-router:high · max high · $0.42 · 12%`. No configuration is
+required: sensible defaults are built in.
 
 ## Commands
 
@@ -374,7 +376,8 @@ Later sources win:
 2. `~/.pi/agent/pi-jev-model-router.generated.json`: only `routes` and `kindModels`, written by `/jev-router suggest --write`
 3. `~/.pi/agent/pi-jev-model-router.json`
 4. `<cwd>/.pi/pi-jev-model-router.json` (trusted projects only)
-5. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`), `JEV_ROUTER_OFF=1`
+5. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`),
+   `JEV_ROUTER_MAX_TIER` (`quick|standard|high|premium|xpremium`), `JEV_ROUTER_OFF=1`
 
 A full example lives at
 [`extensions/pi-jev-model-router/pi-jev-model-router.example.json`](extensions/pi-jev-model-router/pi-jev-model-router.example.json).
@@ -539,6 +542,38 @@ Otherwise the `xpremium` chain is never tried, not even as a fallback when
 `premium` is unavailable. `kindMinimumTier: "xpremium"` is treated as `premium`.
 A kind specialist with `minTier: "xpremium"` only serves promoted turns.
 
+## Tier ceiling
+
+`maxTier` is a hard ceiling. Nothing above it can become a candidate: not the
+chosen tier, not a neighbouring tier pulled in when a chain is unavailable, not a
+kind specialist, and not the `xpremium` promotion. Routing keeps working, it
+just cannot reach the expensive rungs.
+
+```json
+{
+  "maxTier": "high"
+}
+```
+
+This is the lever for a session that has nobody at a routing dialog. A pi
+launched by an app, a bot chat, a subagent or a worker agent cannot answer
+`confirm` and must not spend premium money; `enabled: false` would turn routing
+off entirely, while the ceiling routes normally inside a known budget.
+
+`JEV_ROUTER_MAX_TIER` (`quick`, `standard`, `high`, `premium`, `xpremium`)
+overrides the file for that process only, which is how a launcher caps its own
+children without editing a shared config file.
+
+The default is `xpremium`, so a config that does not set the key routes exactly
+as before. The status line shows the ceiling only when it is lower than the
+default (`jev-router:high · max high`), and a decision that the ceiling moved
+says so in its notes (`ceiling high → capped at high`). A current model above
+the ceiling is never kept by `stickiness` or the prompt-cache guard, since that
+would route around the cap.
+
+An unknown value is ignored: the ceiling already in effect stays and one warning
+is reported at session start. A typo can never raise the ceiling.
+
 ## Confirming an expensive switch
 
 Jev occasionally reads a medium turn as `premium` or `xpremium`. `confirm.tiers`
@@ -696,6 +731,30 @@ This reduces the risk of mid-flight cancellation; it cannot reserve quota or
 predict how much a long-running turn will consume. Model-scoped quotas, generic
 HTTP adapters, and turn-dependent floors are deliberately deferred.
 
+## Z.AI quota guards
+
+The Z.AI coding plan has a 5 hour token window shared across GLM models. Opt in
+the same way as the Codex guard:
+
+```json
+{
+  "quota": {
+    "zai": {
+      "cacheTtlSec": 120,
+      "onUnknown": "use",
+      "minQuota": { "fiveHour": 0.10 }
+    }
+  }
+}
+```
+
+Only `fiveHour` is read. The lite plan reports no weekly token window, and its
+monthly entry is a time limit, not a token quota. A `zai` target whose 5h
+remaining falls below the floor is skipped and the next candidate is tried.
+Readings refresh in the background using Pi's z.ai credentials, and `onUnknown`
+decides a missing or stale reading exactly as it does for Codex. `/jev-router
+quota` and `/jev-router status` show the z.ai reading beside the Codex one.
+
 ## Unavailable-model recovery
 
 Recovery is **off by default**. Opt in explicitly:
@@ -815,10 +874,10 @@ the judgment is untouched and a free model never has to pretend to be a tier.
 
 Pool entries match on provider and model exactly, so a missing free model never
 falls back to a paid model with the same ID. The first pool entry in the model
-catalogue wins; one that is missing falls through to the normal chains. When a pool
-model wins, the decision still reports the tier Jev judged, plus a
-`free pool → <model>` note, so the transcript shows why the tier and the model
-differ.
+catalogue that passes eligibility wins; missing or ineligible entries fall through.
+The `free pool → <model>` note means the pool produced the final routing decision.
+It is omitted when a kind or tier entry wins instead, or when the cache guard
+keeps the current model.
 
 A pool model is not on any tier, so `tierForModel` reports no tier for it and the
 status line falls back to `jev-router:on`. That is deliberate: a free model has no
@@ -839,6 +898,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `enabled` | `true` | Master switch |
 | `useDefaultModels` | `true` | `false` drops the built-in model chains so only your config's models are used |
 | `mode` | `"auto"` | `auto` \| `confirm` \| `notify` |
+| `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, served by a kind specialist, or promoted into `xpremium` |
 | `apiKeyEnv` / `apiKey` | `TYPESAFE_API_KEY` | TypeSafe credentials |
 | `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` / `https://api.typesafe.ai/v1/systemone` | TypeSafe-compatible evaluation endpoint (non-empty env wins over `endpoint`) |
 | `jevModel` | `"jev-latest"` | Jev model alias |

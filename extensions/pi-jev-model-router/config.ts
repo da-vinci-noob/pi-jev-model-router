@@ -15,6 +15,8 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 
 export type Tier = "quick" | "standard" | "high" | "premium" | "xpremium";
 export const TIERS: readonly Tier[] = ["quick", "standard", "high", "premium", "xpremium"] as const;
+/** Route to every tier unless a launcher caps the ceiling. */
+export const DEFAULT_MAX_TIER: Tier = "xpremium";
 
 export type Mode = "auto" | "confirm" | "notify";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -49,6 +51,18 @@ export interface CodexQuotaConfig {
   cacheTtlSec: number;
   onUnknown: "use" | "skip";
   /** Floors shared by every resolved openai-codex model. */
+  minQuota: QuotaFloors;
+}
+
+/** Z.AI coding-plan quota. Only the 5h token window is reported and gated. */
+export interface ZaiQuotaConfig {
+  enabled: boolean;
+  cacheTtlSec: number;
+  onUnknown: "use" | "skip";
+  /**
+   * Floor for the shared 5h session window (unit 3). The lite plan reports no
+   * weekly token window, so `weekly` is accepted but ignored by the reader.
+   */
   minQuota: QuotaFloors;
 }
 
@@ -150,6 +164,17 @@ export interface JevRouterConfig {
    * defaults (endpoint, timeouts, budget, kind floors) still apply.
    */
   useDefaultModels: boolean;
+  /**
+   * Highest tier this process may route to. Everything above it is unreachable:
+   * no candidate, no neighbouring-tier fallback, no specialist.
+   *
+   * This is the lever for a launching context (a bot chat, a subagent, a worker
+   * agent) that cannot answer a routing dialog and must never spend premium
+   * money. `enabled: false` would kill routing entirely; the ceiling keeps
+   * routing and caps it. Defaults to `xpremium`, so nothing changes for a config
+   * that does not set it.
+   */
+  maxTier?: Tier;
   apiKeyEnv: string;
   apiKey?: string;
   endpointEnv: string;
@@ -183,9 +208,15 @@ export interface JevRouterConfig {
   taskKinds: Record<string, string>;
   ranking: RankingConfig;
   confirm: ConfirmConfig;
-  quota: { "openai-codex"?: CodexQuotaConfig };
+  quota: { "openai-codex"?: CodexQuotaConfig; zai?: ZaiQuotaConfig };
   recovery: { enabled: boolean; parkMs: number };
   rateLimit: RateLimitConfig;
+  /**
+   * Config values rejected at load time, reported once at session start.
+   * Output only: a rejected value never loosens a limit, so a typo can not
+   * silently raise the ceiling.
+   */
+  warnings?: string[];
 }
 
 export const TASK_KINDS: Record<string, string> = {
@@ -205,6 +236,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
   enabled: true,
   mode: "auto",
   useDefaultModels: true,
+  maxTier: "xpremium",
   apiKeyEnv: "TYPESAFE_API_KEY",
   endpointEnv: "TYPESAFE_API_URL",
   endpoint: "https://api.typesafe.ai/v1/systemone",
@@ -407,8 +439,26 @@ function resolveScoresFile(value: unknown, fallback: string): string {
   return value;
 }
 
+function isTier(value: unknown): value is Tier {
+  return typeof value === "string" && (TIERS as readonly string[]).includes(value);
+}
+
+/**
+ * Validate a declared tier ceiling. An unknown value keeps the ceiling already in
+ * effect (the default out of the box) and records a warning, so a typo can never
+ * silently move the ceiling up.
+ */
+function normalizeMaxTier(value: unknown, fallback: Tier, warnings: string[]): Tier {
+  if (value === undefined) return fallback;
+  if (isTier(value)) return value;
+  warnings.push(`maxTier ${JSON.stringify(value)} is not a tier; keeping ${fallback}.`);
+  return fallback;
+}
+
 function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
   const p = asRecord(patch);
+  const warnings = [...(base.warnings ?? [])];
+  const maxTier = normalizeMaxTier(p.maxTier, base.maxTier ?? DEFAULT_MAX_TIER, warnings);
   const routes = { ...base.routes };
   const rawRoutes = asRecord(p.routes);
   for (const tier of TIERS) {
@@ -495,9 +545,23 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
       minQuota: { ...previous?.minQuota, ...normalizeQuotaFloors(patch.minQuota) },
     };
   }
+  const rawZai = asRecord(p.quota)["zai"];
+  if (rawZai && typeof rawZai === "object" && !Array.isArray(rawZai)) {
+    const patch = asRecord(rawZai);
+    const previous = quota["zai"];
+    quota["zai"] = {
+      enabled: typeof patch.enabled === "boolean" ? patch.enabled : previous?.enabled ?? true,
+      cacheTtlSec: typeof patch.cacheTtlSec === "number" && Number.isFinite(patch.cacheTtlSec) && patch.cacheTtlSec >= 1 && patch.cacheTtlSec <= 86400
+        ? patch.cacheTtlSec : previous?.cacheTtlSec ?? 120,
+      onUnknown: patch.onUnknown === "use" || patch.onUnknown === "skip" ? patch.onUnknown : previous?.onUnknown ?? "use",
+      minQuota: { ...previous?.minQuota, ...normalizeQuotaFloors(patch.minQuota) },
+    };
+  }
   return {
     ...base,
     ...(p as Partial<JevRouterConfig>),
+    maxTier,
+    warnings: warnings.length > 0 ? warnings : undefined,
     routes,
     kindModels,
     taskKinds,
@@ -555,7 +619,22 @@ export function loadConfig(cwd?: string): JevRouterConfig {
   if (process.env.JEV_ROUTER_OFF === "1" || process.env.JEV_ROUTER_OFF === "true") {
     config.enabled = false;
   }
+  // A launcher caps its own process without touching a config file.
+  applyEnvMaxTier(config);
   return config;
+}
+
+/** `JEV_ROUTER_MAX_TIER` narrows (or widens) the ceiling for this process only. */
+function applyEnvMaxTier(config: JevRouterConfig): void {
+  const raw = process.env.JEV_ROUTER_MAX_TIER?.trim().toLowerCase();
+  if (!raw) return;
+  if (isTier(raw)) {
+    config.maxTier = raw;
+    return;
+  }
+  const warnings = [...(config.warnings ?? [])];
+  warnings.push(`JEV_ROUTER_MAX_TIER=${raw} is not a tier; keeping ${config.maxTier ?? DEFAULT_MAX_TIER}.`);
+  config.warnings = warnings;
 }
 
 function emptyChains(): Record<Tier, RouteChain> {

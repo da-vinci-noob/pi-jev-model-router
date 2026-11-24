@@ -44,6 +44,31 @@ test("cache retention cannot keep a quota-rejected model even inside its demand 
   expect(decision.model?.id).toBe("luna");
   expect(decision.held).not.toBe(true);
 });
+
+test.each(["prefer", "fallback-only"] as const)("attributes an eligible duplicate to its actual chain (%s)", (poolPolicy) => {
+  const poolWins = poolPolicy === "fallback-only";
+  const strict = { ...luna, minQuota: { fiveHour: 0.2 } };
+  const poolEntry = poolWins ? luna : strict;
+  const kindEntry = { ...(poolWins ? strict : luna), minTier: "premium" as const };
+  const decision = route({
+    routes: { quick: [], standard: [], high: [], premium: [], xpremium: [] },
+    free: { enabled: true, policy: poolPolicy, pool: [poolEntry] },
+    kindModels: { plan: [kindEntry] },
+  })!;
+  expect(decision.target).toBe(poolWins ? poolEntry : kindEntry);
+  expect(decision.kindSpecialised).toBe(!poolWins);
+  expect(decision.notes.includes("free pool → luna")).toBe(poolWins);
+});
+
+test("does not report a pool win when the warm cache keeps another model", () => {
+  const decision = route({
+    free: { enabled: true, policy: "prefer", pool: [luna] },
+    cache: { aware: true, deadband: 0.25, maxPenaltyUsd: 0, bypassTierDelta: 2 },
+  }, snapshot, { contextTokens: 100000, current: { index: 3, model: models[2] } })!;
+  expect(decision.model?.id).toBe("alternative");
+  expect(decision.held).toBe(true);
+  expect(decision.notes).not.toContain("free pool → luna");
+});
 test("all-rejected decisions preserve diagnostic notes", () => {
   const notes: string[] = [];
   const decision = route({ routes: { quick: [], standard: [], high: [], premium: [sol], xpremium: [] } }, snapshot, { notes });

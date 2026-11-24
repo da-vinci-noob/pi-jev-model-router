@@ -317,6 +317,22 @@ describe("decide: free pool", () => {
     expect(d.model).toBe(p1);
     expect(decide(analysis(), config({ free: { ...free, policy: "fallback-only" } }), options({ models: [impostor] }))).toBeUndefined();
   });
+
+  test("a free model duplicated in a kind chain is not reported as a pool hit", () => {
+    const free = { enabled: true, policy: "fallback-only" as const, pool };
+    const kindFree: RouteTarget = { provider: "freeprov", model: "free-a", minTier: "quick", priority: 10 };
+    const d = run({ kind: "chat" }, { free, kindModels: { chat: [kindFree] } }, { models });
+    expect(d.model).toBe(freeModel);
+    expect(d.kindSpecialised).toBe(true);
+    expect(d.notes).not.toContain("free pool → free-a");
+  });
+
+  test("a pool-only fallback still reports the pool hit", () => {
+    const free = { enabled: true, policy: "fallback-only" as const, pool };
+    const d = run({}, { free }, { models: [freeModel] });
+    expect(d.model).toBe(freeModel);
+    expect(d.notes).toContain("free pool → free-a");
+  });
 });
 
 describe("decide: cache guard", () => {
@@ -387,6 +403,17 @@ describe("findModel / firstAvailable", () => {
     expect(hit?.model).toBe(h1);
     expect(hit?.target).toBe(chain[1]);
     expect(firstAvailable(ALL, [{ provider: P, model: "missing" }])).toBeUndefined();
+  });
+
+  test("records a note for a chained model that is not in the catalogue", () => {
+    const chain: RouteTarget[] = [
+      { provider: P, model: "missing" },
+      { provider: P, model: "model-q1" },
+    ];
+    const notes: string[] = [];
+    const hit = firstAvailable(ALL, chain, undefined, notes);
+    expect(hit?.model).toBe(q1);
+    expect(notes).toContain(`${P}/missing skipped: not in the model catalogue`);
   });
 });
 
@@ -503,6 +530,83 @@ describe("decide: xpremium and the cache guard", () => {
     });
     expect(d.model).toBe(p1);
     expect(d.held).toBeUndefined();
+  });
+});
+
+describe("decide: maxTier ceiling", () => {
+  const models = [...ALL, x1];
+  const withXpremium = (extra: Partial<JevRouterConfig> = {}): Partial<JevRouterConfig> => ({
+    routes: { ...config().routes, xpremium: [{ provider: P, model: "model-x1", thinkingLevel: "high" as const }] },
+    ...extra,
+  });
+
+  test("premium demand is capped at the ceiling and says so", () => {
+    const d = run(premiumDemand, { maxTier: "high" }, { models });
+    expect(d.desiredTier).toBe("premium");
+    expect(d.tier).toBe("high");
+    expect(d.tierIndex).toBe(2);
+    expect(d.model?.id).toBe("model-h1");
+    expect(d.downgraded).toBe(true);
+    expect(d.notes).toContain("ceiling high → capped at high");
+  });
+
+  test("a ceiling below xpremium blocks the tier even when the turn is eligible", () => {
+    expect(run(premiumDemand, withXpremium(), { models }).tier).toBe("xpremium");
+    const d = run(premiumDemand, withXpremium({ maxTier: "high" }), { models });
+    expect(d.desiredTier).toBe("premium");
+    expect(d.tier).toBe("high");
+    expect(d.model?.id).toBe("model-h1");
+  });
+
+  test("no above-ceiling neighbour is chosen when every chain inside the ceiling is unavailable", () => {
+    const thin = [q1, s1, p1];
+    expect(run(premiumDemand, {}, { models: thin }).model?.id).toBe("model-p1");
+    const d = run(premiumDemand, { maxTier: "high" }, { models: thin });
+    expect(d.tier).toBe("standard");
+    expect(d.model?.id).toBe("model-s1");
+  });
+
+  test("the xpremium chain is not a fallback above a premium ceiling", () => {
+    const d = run(premiumDemand, withXpremium({ maxTier: "premium" }), { models });
+    expect(d.tier).toBe("premium");
+    expect(d.model?.id).toBe("model-p1");
+  });
+
+  test("a kind specialist gated above the ceiling is skipped", () => {
+    const kindModels = {
+      plan: [
+        { provider: P, model: "spec-top", minTier: "premium" as const, priority: 5 },
+        { provider: P, model: "spec-high", minTier: "high" as const },
+      ],
+    };
+    const pool = [...models, model("spec-top"), model("spec-high")];
+    expect(run({ kind: "plan", ...premiumDemand }, { kindModels }, { models: pool }).model?.id).toBe("spec-top");
+    expect(
+      run({ kind: "plan", ...premiumDemand }, { kindModels, maxTier: "high" }, { models: pool }).model?.id,
+    ).toBe("spec-high");
+  });
+
+  test("kindCandidates never offers a specialist above the ceiling", () => {
+    const kindModels = { plan: [{ provider: P, model: "spec-top", minTier: "premium" as const }] };
+    expect(kindCandidates(config({ kindModels }), "plan", 3)).toHaveLength(1);
+    expect(kindCandidates(config({ kindModels, maxTier: "high" }), "plan", 3)).toEqual([]);
+  });
+
+  test("the cache guard does not hold a current model above the ceiling", () => {
+    const cache = { aware: true, deadband: 0.25, maxPenaltyUsd: 5, bypassTierDelta: 2 };
+    const d = run(premiumDemand, { cache, maxTier: "high" }, { models, contextTokens: 1_000, current: { index: 3, model: p1 } });
+    expect(d.held).toBeUndefined();
+    expect(d.tier).toBe("high");
+    expect(d.model?.id).toBe("model-h1");
+    expect(d.notes.some((note) => note.includes("above ceiling high"))).toBe(true);
+  });
+
+  test("describeKindRoutes stops at the ceiling", () => {
+    const kindModels = { plan: [{ provider: P, model: "spec-p", minTier: "premium" as const }] };
+    const pool = [...models, model("spec-p")];
+    const base = { kindModels, kindMinimumTier: { plan: "premium" as const } };
+    expect(describeKindRoutes(config(base), pool, "plan")).toBe("premium: spec-p");
+    expect(describeKindRoutes(config({ ...base, maxTier: "high" }), pool, "plan")).toBe("high: tier chain");
   });
 });
 

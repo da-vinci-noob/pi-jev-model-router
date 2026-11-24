@@ -17,7 +17,8 @@ import { dirname } from "node:path";
 import { Type } from "typebox";
 import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
-import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary } from "./quota";
+import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary, type QuotaEligibility } from "./quota";
+import { describeZaiQuotaStatus, zaiQuotaEligibility, zaiQuotaSummary, ZaiQuotaCache } from "./zai-quota";
 import { isModelUnavailable, isRateLimited, Parking } from "./recovery";
 import {
   formatUsd,
@@ -41,6 +42,7 @@ import {
   describeDecision,
   firstAvailable,
   kindCandidates,
+  maxTierIndex,
   tierIndex,
   tierForModel,
   type AvailableModel,
@@ -58,6 +60,7 @@ interface Runtime {
   appliedTierIndex?: number;
   lastEntrySignature?: string;
   quota?: CodexQuotaCache;
+  zaiQuota?: ZaiQuotaCache;
   routeNotes: string[];
  parking?: Parking;
  recovery?: { decision: Decision; analysis: RouteAnalysis; attempted: Set<string>; toolsRan: boolean };
@@ -267,10 +270,20 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   }
   const tier = runtime.appliedTierIndex !== undefined ? TIERS[runtime.appliedTierIndex] : "on";
   const parts = [`jev-router:${tier}`];
+  const ceiling = runtime.config.maxTier;
+  if (ceiling !== undefined && ceiling !== "xpremium") parts.push(`max ${ceiling}`);
   if (spend.today > 0) parts.push(formatUsd(spend.today));
   if (spend.pressure > 0) parts.push(`${Math.round(spend.pressure * 100)}%`);
   if (runtime.config.mode !== "auto") parts.push(runtime.config.mode);
   setStatus(ctx, parts.join(" · "));
+}
+
+function providerEligibility(target: RouteTarget, provider: string, runtime: Runtime): QuotaEligibility {
+  if (provider === "openai-codex") {
+    return quotaEligibility(target, provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  }
+  if (provider === "zai") return zaiQuotaEligibility(target, runtime.config.quota.zai, runtime.zaiQuota?.snapshot);
+  return { allowed: true, notes: [] };
 }
 
 function eligibilityFor(runtime: Runtime): TargetEligibility {
@@ -282,7 +295,7 @@ function eligibilityFor(runtime: Runtime): TargetEligibility {
     if (runtime.parking?.has(key, Date.now(), runtime.config)) {
       return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
     }
-    return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+    return providerEligibility(target, model.provider, runtime);
   };
 }
 
@@ -308,7 +321,7 @@ function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: str
     if (!notes.includes(note)) notes.push(note);
     return false;
   }
-  const result = quotaEligibility(current.target, current.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  const result = providerEligibility(current.target, current.provider, runtime);
   for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
   return result.allowed;
 }
@@ -509,7 +522,11 @@ async function applyDecision(
   const targetKey = decision.model ? `${decision.model.provider}/${decision.model.id}` : undefined;
   const keepCurrent =
     decision.held === true ||
-    (runtime.config.stickiness && targetKey !== undefined && currentKey === targetKey);
+    (runtime.config.stickiness &&
+      targetKey !== undefined &&
+      currentKey === targetKey &&
+      // A ceiling can make the current model unreachable; do not keep it.
+      decision.tierIndex <= maxTierIndex(runtime.config));
 
   if (keepCurrent) {
     if (!eligibleTarget(decision.target, decision.model!, eligibilityFor(runtime), decision.notes)) {
@@ -741,6 +758,17 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       runtime.quota.start();
       await runtime.quota.ready;
     }
+    runtime.zaiQuota?.stop();
+    runtime.zaiQuota = undefined;
+    const zaiQuotaConfig = runtime.config.quota.zai;
+    if (zaiQuotaConfig?.enabled) {
+      runtime.zaiQuota = new ZaiQuotaCache(
+        zaiQuotaConfig,
+        async () => ctx.modelRegistry?.getApiKeyForProvider?.("zai"),
+      );
+      runtime.zaiQuota.start();
+      await runtime.zaiQuota.ready;
+    }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
     if (runtime.config.enabled && !hasApiKey(runtime.config)) {
@@ -759,10 +787,14 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
         );
       }
     }
+    if (runtime.config.warnings?.length) {
+      notify(ctx, `pi-jev-model-router: ${runtime.config.warnings.join(" ")}`, "warning");
+    }
   });
 
   pi.on("session_shutdown", async () => {
     runtime.quota?.stop();
+    runtime.zaiQuota?.stop();
     saveLedger(runtime.config.stateFile, runtime.ledger);
   });
 
@@ -793,6 +825,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  });
  pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; runtime.handledFailureKey = undefined; });
  pi.on("turn_end", async (event) => {
+  // SAFETY: the host emits a wider event than the narrow failure record kept here. Only
+  // `outcome` and `message` are read, and both arrive on this event.
   runtime.failed = event as unknown as Runtime["failed"];
   const message = event.message;
   if (event.outcome === "completed" && message.role === "assistant") {
@@ -801,6 +835,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  });
  pi.on("agent_before_settle", async (event, ctx) => {
   // Failed requests can bypass finishTurn; act only at the final actionable boundary.
+  // SAFETY: merging the last recorded failure with this event yields the fields read
+  // below (`message`, `messageEntryId`, `entries`, `context`), and each is guarded.
   const boundary = { ...runtime.failed, ...event } as unknown as NonNullable<Runtime["failed"]> & {
    entries?: unknown[]; context?: { canContinue?: boolean };
   };
@@ -993,19 +1029,20 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
      return;
     }
     case "quota": {
-     const quotaConfig = runtime.config.quota["openai-codex"];
-     notify(
-      ctx,
-      describeQuotaStatus({
-       config: quotaConfig,
-       snapshot: runtime.quota?.snapshot,
-       lastError: runtime.quota?.lastError,
-       restored: runtime.quota?.restored,
-      }).join("\n"),
-      quotaConfig?.enabled ? "info" : "warning",
-     );
-          return;
-        }
+      const codexConfig = runtime.config.quota["openai-codex"];
+      const zaiConfig = runtime.config.quota.zai;
+      const lines = [
+        ...describeQuotaStatus({
+          config: codexConfig,
+          snapshot: runtime.quota?.snapshot,
+          lastError: runtime.quota?.lastError,
+          restored: runtime.quota?.restored,
+        }),
+        ...describeZaiQuotaStatus(zaiConfig, runtime.zaiQuota?.snapshot, runtime.zaiQuota?.lastError),
+      ];
+      notify(ctx, lines.join("\n"), codexConfig?.enabled || zaiConfig?.enabled ? "info" : "warning");
+      return;
+    }
         case "revert": {
           if (!runtime.previousModelKey) {
             notify(ctx, "no previous model recorded", "warning");
@@ -1080,9 +1117,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             } finally {
               try {
                 rmSync(tmp, { force: true });
-              } catch {
-                /* best-effort cleanup */
-              }
+              } catch { /* best-effort cleanup */ }
             }
             runtime.config = loadConfig(ctx.cwd);
             statusLine(ctx, runtime);
@@ -1121,6 +1156,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
        lastError: runtime.quota?.lastError,
        restored: runtime.quota?.restored,
       }),
+      zaiQuotaSummary(runtime.config.quota.zai, runtime.zaiQuota?.snapshot, runtime.zaiQuota?.lastError),
       `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
       `rate limits: ${runtime.config.rateLimit.enabled ? "on" : "off"}`,
       ...(runtime.parking?.list() ?? []),

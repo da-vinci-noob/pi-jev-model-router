@@ -72,23 +72,6 @@ export function eligibleTarget(target: RouteTarget, model: AvailableModel, eligi
   return result?.allowed ?? true;
 }
 
-/** A candidate route and the chain it came from, so the winner's tier stays known. */
-type Candidate = { target: RouteTarget; tier?: number; kind?: boolean };
-
-/** First candidate whose model is available and eligible, with its chain attached. */
-function firstAvailableIn(
-  models: readonly AvailableModel[],
-  candidates: readonly Candidate[],
-  eligibility?: TargetEligibility,
-  notes?: string[],
-): (Candidate & { model: AvailableModel }) | undefined {
-  for (const candidate of candidates) {
-    const model = findModel(models, candidate.target);
-    if (model && eligibleTarget(candidate.target, model, eligibility, notes)) return { ...candidate, model };
-  }
-  return undefined;
-}
-
 export interface AvailableModel {
   provider: string;
   id: string;
@@ -125,6 +108,15 @@ export function tierIndex(tier: Tier | undefined): number {
 
 const PREMIUM = TIERS.indexOf("premium");
 
+/**
+ * Highest tier index this config may route to. `maxTier` is a hard ceiling, so a
+ * launching context that cannot answer a dialog can forbid the expensive tiers
+ * without turning routing off. Unset means no ceiling.
+ */
+export function maxTierIndex(config: JevRouterConfig): number {
+  return config.maxTier === undefined ? PREMIUM + 1 : Math.min(tierIndex(config.maxTier), PREMIUM + 1);
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -148,23 +140,29 @@ export function firstAvailable(
 ): { target: RouteTarget; model: AvailableModel } | undefined {
   for (const target of chain) {
     const model = findModel(models, target);
-    if (model && eligibleTarget(target, model, eligibility, notes)) return { target, model };
+    if (!model) {
+      const note = `${target.provider}/${target.model} skipped: not in the model catalogue`;
+      if (notes && !notes.includes(note)) notes.push(note);
+      continue;
+    }
+    if (eligibleTarget(target, model, eligibility, notes)) return { target, model };
   }
   return undefined;
 }
 
 /** Kind specialists eligible at a tier, in the order `decide()` tries them. */
 export function kindCandidates(config: JevRouterConfig, kind: string, index: number): RouteTarget[] {
+  const limit = Math.min(index, maxTierIndex(config));
   return (config.kindModels[kind] ?? [])
-    .filter((target) => tierIndex(target.minTier) <= index)
+    .filter((target) => tierIndex(target.minTier) <= limit)
     .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || tierIndex(b.minTier) - tierIndex(a.minTier));
 }
 
 /** The specialist that wins at each tier from the kind's floor up, merging runs, e.g. `high: a · premium: b`. */
 export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string, eligibility?: TargetEligibility): string {
   const spans: { from: Tier; to: Tier; model: string }[] = [];
-  const top = config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM;
-  for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), PREMIUM); i <= top; i += 1) {
+  const top = Math.min(config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM, maxTierIndex(config));
+  for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), top); i <= top; i += 1) {
     const model = firstAvailable(models, kindCandidates(config, kind, i), eligibility)?.model.id ?? "tier chain";
     const last = spans[spans.length - 1];
     if (last?.model === model) last.to = TIERS[i];
@@ -260,6 +258,7 @@ export function decide(
 ): Decision | undefined {
   const notes: string[] = options.notes ?? [];
   const { spend } = options;
+  const ceiling = maxTierIndex(config);
 
   let demand = 0.55 * analysis.complexity + 0.45 * analysis.budgetIntensity;
   if (analysis.deepReasoning >= 0.65) demand += 0.75;
@@ -291,6 +290,7 @@ export function decide(
   }
 
   const xpremiumEligible =
+    ceiling > PREMIUM &&
     config.routes.xpremium.length > 0 &&
     demandReachesPremium &&
     analysis.kindConfidence > 0 &&
@@ -299,7 +299,9 @@ export function decide(
     desiredIndex = PREMIUM + 1;
     index = desiredIndex;
   }
-  const tierCount = xpremiumEligible ? TIERS.length : PREMIUM + 1;
+  // `tierCount` bounds the neighbouring-tier expansion, so an unavailable chain
+  // can never pull a tier above the ceiling back in.
+  const tierCount = Math.min(xpremiumEligible ? TIERS.length : PREMIUM + 1, ceiling + 1);
 
   // Budget guard: hard pressure forces the cheap tier unless the work is clearly architectural.
   let downgraded = false;
@@ -320,6 +322,15 @@ export function decide(
     }
   }
 
+  // Ceiling guard: the most expensive tier this process may touch. It runs after
+  // the kind floor, the confidence guard and both budget guards, so whichever of
+  // them picks a tier, nothing above `maxTier` survives.
+  if (index > ceiling) {
+    notes.push(`ceiling ${TIERS[ceiling]} → capped at ${TIERS[ceiling]}`);
+    index = ceiling;
+    downgraded = true;
+  }
+
   // Candidate order: the free pool (when `prefer`), then kind specialists for the
   // chosen tier, then the tier chain, then neighbouring tiers (nearest first) so an
   // unavailable model never blocks routing. Specialists are ranked by `priority` (higher
@@ -331,43 +342,45 @@ export function decide(
     ? config.free.pool.filter((t) => options.models.some((m) => m.provider === t.provider && m.id === t.model))
     : [];
   const kindChain = kindCandidates(config, analysis.kind, index);
-  // Each candidate carries the chain it came from. Deriving the serving tier from
-  // matching model IDs would let a same-model duplicate in an expired chain report
-  // the wrong tier, and the approval gate keys off the reported tier.
-  const ordered: Candidate[] = [];
-  if (config.free.policy === "prefer") ordered.push(...freePool.map((target) => ({ target })));
-  ordered.push(
-    ...kindChain.map((target) => ({ target, kind: true })),
-    ...config.routes[TIERS[index]].map((target) => ({ target, tier: index })),
-  );
+  const chains = [
+    ...(config.free.policy === "prefer" ? [{ targets: freePool, source: "pool" as const }] : []),
+    { targets: kindChain, source: "kind" as const },
+    { targets: config.routes[TIERS[index]], source: index },
+  ];
   for (let offset = 1; offset < tierCount; offset += 1) {
-    if (index - offset >= 0) {
-      ordered.push(...config.routes[TIERS[index - offset]].map((target) => ({ target, tier: index - offset })));
-    }
-    if (index + offset < tierCount) {
-      ordered.push(...config.routes[TIERS[index + offset]].map((target) => ({ target, tier: index + offset })));
+    const lower = index - offset;
+    const higher = index + offset;
+    if (lower >= 0) chains.push({ targets: config.routes[TIERS[lower]], source: lower });
+    if (higher < tierCount) chains.push({ targets: config.routes[TIERS[higher]], source: higher });
+  }
+  if (config.free.policy === "fallback-only") chains.push({ targets: freePool, source: "pool" });
+
+  let available: { target: RouteTarget; model: AvailableModel } | undefined;
+  let source: (typeof chains)[number]["source"] = index;
+  for (const chain of chains) {
+    available = firstAvailable(options.models, chain.targets, options.eligibility, notes);
+    if (available) {
+      source = chain.source;
+      break;
     }
   }
-  if (config.free.policy === "fallback-only") ordered.push(...freePool.map((target) => ({ target })));
-
-  const available = firstAvailableIn(options.models, ordered, options.eligibility, notes);
   if (!available) return undefined;
 
   const currentIndex = options.current?.index;
   const currentModel = options.current?.model;
   const currentTarget = currentModel ? options.current?.target ?? targetForModel(config, currentModel) : undefined;
   const currentEligible = !currentModel || !currentTarget || eligibleTarget(currentTarget, currentModel, options.eligibility, notes);
-
-  const usedKindChain = available.kind === true;
-  if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
-    notes.push(`free pool → ${available.model.id}`);
+  // A current model above the ceiling is on its way out, so never hold it for the
+  // cache; the downgrade is the point of the ceiling.
+  if (currentIndex !== undefined && currentIndex > ceiling) {
+    notes.push(`current ${TIERS[currentIndex]} sits above ceiling ${TIERS[ceiling]} → ${TIERS[index]}`);
   }
-  // The winner knows which chain served it, so an unavailable tier is reported as
-  // the neighbour that actually served the turn.
-  if (available.tier !== undefined && available.tier !== index) {
-    notes.push(`${TIERS[index]} chain unavailable → ${TIERS[available.tier]}`);
-    downgraded = available.tier < index;
-    index = available.tier;
+
+  const effectiveIndex = typeof source === "number" ? source : index;
+  if (effectiveIndex !== index) {
+    notes.push(`${TIERS[index]} chain unavailable → ${TIERS[effectiveIndex]}`);
+    downgraded = effectiveIndex < index;
+    index = effectiveIndex;
   }
 
   // Cache guard: a model switch discards the provider's prompt cache, so the next
@@ -379,6 +392,7 @@ export function decide(
     currentEligible &&
     currentIndex !== undefined &&
     currentModel &&
+    currentIndex <= ceiling &&
     (currentIndex <= PREMIUM || index > PREMIUM) &&
     (available.model.provider !== currentModel.provider || available.model.id !== currentModel.id)
   ) {
@@ -426,6 +440,8 @@ export function decide(
     }
   }
 
+  if (source === "pool") notes.push(`free pool → ${available.model.id}`);
+
   const reason =
     `${analysis.kind} · complexity ${analysis.complexity.toFixed(2)}/3 · ` +
     `capability ${analysis.budgetIntensity.toFixed(2)}/3 · reasoning ${analysis.deepReasoning.toFixed(2)}` +
@@ -441,7 +457,7 @@ export function decide(
     budgetPressure: spend.pressure,
     downgraded,
     lowConfidenceFallback,
-    kindSpecialised: usedKindChain,
+    kindSpecialised: source === "kind",
     reason,
     notes,
   };
