@@ -170,7 +170,7 @@ function appendSkipEntry(skipReason: string, ctx: ExtensionContext, runtime: Run
       deepReasoning: 0,
       demand: 0,
       pressure: spendSnapshot(runtime.ledger, runtime.config.budget).pressure,
-      reason: blocked ? "no eligible route — prompt not sent (quota guard)" :
+      reason: blocked ? "no eligible route — prompt not sent" :
         SKIP_REASONS[skipReason] ??
         `${skipReason} — staying on the current model`,
       notes: skipReason === "no route available" ? [...runtime.routeNotes] : [],
@@ -283,6 +283,11 @@ function eligibilityFor(runtime: Runtime): TargetEligibility {
  };
 }
 
+function aboveTierCeiling(key: string | undefined, config: JevRouterConfig): boolean {
+  const tier = tierForModel(key, config);
+  return tier !== undefined && tier > maxTierIndex(config);
+}
+
 function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
   if (!ctx.model) return true;
   const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
@@ -301,8 +306,12 @@ function formatParkDuration(parkMs: number): string {
   return `${parkMs}ms`;
 }
 
-/** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
-function quotaBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
+/** A failed or declined switch must not submit on an ineligible current model. */
+function submissionBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
+  if (aboveTierCeiling(currentModelKey(ctx), runtime.config)) {
+    notify(ctx, `jev-router: prompt not sent; current model is above the tier ceiling (${runtime.config.maxTier}). Choose another model.`, "warning");
+    return true;
+  }
   if (currentQuotaAllowed(ctx, runtime, notes)) return false;
   notify(ctx, `jev-router: prompt not sent; current model is quota-ineligible. Choose another model or retry after quota refresh.\n${notes.join("\n")}`, "warning");
   return true;
@@ -397,7 +406,8 @@ async function guardTierSwitch(
   if (!confirm.tiers.includes(decision.tier)) return undefined;
   if (typeof ctx.ui?.input !== "function") return undefined;
 
-  const ladder = TIERS.map((tier, index) => `${index + 1} ${tier}`).join("   ");
+  const ceiling = maxTierIndex(runtime.config);
+  const ladder = TIERS.slice(0, ceiling + 1).map((tier, index) => `${index + 1} ${tier}`).join("   ");
   const answer = await ctx.ui.input(
     `Jev → ${decision.tier} (${decisionModelKey(decision)})\n${decision.reason}\nY/Enter switch · N keep · 0 free · ${ladder}`,
     undefined,
@@ -425,7 +435,12 @@ async function guardTierSwitch(
   }
 
   if (/^[1-5]$/.test(choice)) {
-    const tier = TIERS[Number(choice) - 1];
+    const index = Number(choice) - 1;
+    if (index > ceiling) {
+      decision.notes.push(`tier ${TIERS[index]} exceeds the ceiling (${TIERS[ceiling]})`);
+      return { keep: true, rerouted: false };
+    }
+    const tier = TIERS[index];
     const servable = firstAvailable(runtime.models, runtime.config.routes[tier], eligibilityFor(runtime), decision.notes);
     if (servable) {
       decision.model = servable.model;
@@ -463,7 +478,7 @@ async function applyDecision(
 
   if (keepCurrent) {
     if (!eligibleTarget(decision.target, decision.model!, eligibilityFor(runtime), decision.notes)) {
-      const blocked = quotaBlocked(ctx, runtime, decision.notes);
+      const blocked = submissionBlocked(ctx, runtime, decision.notes);
       appendDecisionEntry(analysis, decision, "skipped", runtime);
       return { action: "skipped", message: "current model is quota-ineligible", blocked };
     }
@@ -479,14 +494,14 @@ async function applyDecision(
   if (runtime.config.mode === "notify") {
     notify(ctx, `${headline}\n${detail}`, "info");
     appendDecisionEntry(analysis, decision, "notified", runtime);
-    return { action: "notified", message: `${headline} (notify only)`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
+    return { action: "notified", message: `${headline} (notify only)`, blocked: submissionBlocked(ctx, runtime, decision.notes) };
   }
 
   // An expensive-tier approval gate, independent of `mode`. It runs before the
   // `confirm` select so a guarded tier asks once, not twice.
   const guard = await guardTierSwitch(decision, ctx, runtime, options);
   if (guard?.keep) {
-    const blocked = quotaBlocked(ctx, runtime, decision.notes);
+    const blocked = submissionBlocked(ctx, runtime, decision.notes);
     if (!blocked && decision.notes.length) notify(ctx, decision.notes.join("\n"), "warning");
     appendDecisionEntry(analysis, decision, "skipped", runtime);
     return { action: "skipped", message: "kept current model", blocked };
@@ -516,7 +531,7 @@ async function applyDecision(
     options_.push(`Keep ${currentModelKey(ctx) ?? "current model"}`);
     const choice = await ctx.ui.select(`Jev suggests ${decision.tier}\n${detail}`, options_);
     if (!choice || choice.startsWith("Keep")) {
-      const blocked = quotaBlocked(ctx, runtime, decision.notes);
+      const blocked = submissionBlocked(ctx, runtime, decision.notes);
       if (!blocked && decision.notes.some((note) => note.includes("codex"))) notify(ctx, decision.notes.join("\n"), "warning");
       appendDecisionEntry(analysis, decision, "skipped", runtime);
       return { action: "skipped", message: "kept current model", blocked };
@@ -535,11 +550,11 @@ async function applyDecision(
       : undefined;
   if (!model) {
     appendDecisionEntry(analysis, decision, "skipped", runtime);
-    return { action: "skipped", message: `${headline} — model not available in this build`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
+    return { action: "skipped", message: `${headline} — model not available in this build`, blocked: submissionBlocked(ctx, runtime, decision.notes) };
   }
 
   if (!eligibleTarget(decision.target, model, eligibilityFor(runtime), decision.notes)) {
-    const blocked = quotaBlocked(ctx, runtime, decision.notes);
+    const blocked = submissionBlocked(ctx, runtime, decision.notes);
     notify(ctx, `jev-router: selected model is quota-ineligible\n${decision.notes.join("\n")}`, "warning");
     appendDecisionEntry(analysis, decision, "skipped", runtime);
     return { action: "skipped", message: "selected model is quota-ineligible", blocked };
@@ -552,7 +567,7 @@ async function applyDecision(
   const ok = await switchModel(model);
   if (!ok) {
     appendDecisionEntry(analysis, decision, "skipped", runtime);
-    return { action: "skipped", message: `${headline} — no auth configured for provider`, blocked: quotaBlocked(ctx, runtime, decision.notes) };
+    return { action: "skipped", message: `${headline} — no auth configured for provider`, blocked: submissionBlocked(ctx, runtime, decision.notes) };
   }
 
   if (previous && previous !== `${model.provider}/${model.id}`) runtime.previousModelKey = previous;
@@ -845,7 +860,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     if (event.source === "extension") return { action: "continue" };
     if (event.images?.length && !event.text?.trim()) {
       const notes: string[] = [];
-      const blocked = quotaBlocked(ctx, runtime, notes);
+      const blocked = submissionBlocked(ctx, runtime, notes);
       if (!blocked && notes.length) notify(ctx, notes.join("\n"), "warning");
       return { action: blocked ? "handled" : "continue" };
     }
@@ -855,7 +870,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     const skip = shouldSkip(text, runtime.config, hasHistory);
     if (skip) {
       const notes: string[] = [];
-      if (skip === "empty" || skip === "slash command" || currentQuotaAllowed(ctx, runtime, notes)) {
+      if (skip === "empty" || skip === "slash command" ||
+        (!aboveTierCeiling(currentModelKey(ctx), runtime.config) && currentQuotaAllowed(ctx, runtime, notes))) {
         if (notes.length) notify(ctx, notes.join("\n"), "warning");
         appendSkipEntry(skip, ctx, runtime);
         return { action: "continue" };
@@ -869,12 +885,12 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       if ("error" in result) {
         statusLine(ctx, runtime);
         notify(ctx, `jev-router: ${result.error}`, "warning");
-        return { action: quotaBlocked(ctx, runtime, runtime.routeNotes) ? "handled" : "continue" };
+        return { action: submissionBlocked(ctx, runtime, runtime.routeNotes) ? "handled" : "continue" };
       }
       const { analysis, decision } = result;
       runtime.lastAnalysis = analysis;
       if (!decision) {
-        const blocked = quotaBlocked(ctx, runtime, runtime.routeNotes);
+        const blocked = submissionBlocked(ctx, runtime, runtime.routeNotes);
         appendSkipEntry("no route available", ctx, runtime, blocked);
         if (runtime.routeNotes.length) notify(ctx, `jev-router: no eligible route\n${runtime.routeNotes.join("\n")}`, "warning");
         statusLine(ctx, runtime);
@@ -889,7 +905,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       statusLine(ctx, runtime);
       const message = error instanceof JevError ? error.message : error instanceof Error ? error.message : String(error);
       if (!/abort/i.test(message)) notify(ctx, `jev-router: ${message}`, "warning");
-      if (quotaBlocked(ctx, runtime, runtime.routeNotes)) return { action: "handled" };
+      if (submissionBlocked(ctx, runtime, runtime.routeNotes)) return { action: "handled" };
     }
     return { action: "continue" };
   });
@@ -962,6 +978,10 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
         case "revert": {
           if (!runtime.previousModelKey) {
             notify(ctx, "no previous model recorded", "warning");
+            return;
+          }
+          if (aboveTierCeiling(runtime.previousModelKey, runtime.config)) {
+            notify(ctx, `cannot revert: previous model is above the tier ceiling (${runtime.config.maxTier})`, "warning");
             return;
           }
           const [provider, ...idParts] = runtime.previousModelKey.split("/");

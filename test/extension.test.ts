@@ -139,6 +139,39 @@ afterEach(async () => {
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 describe("pi extension", () => {
+  test.each(["4", "5"])("ceiling rejects confirmation override %s", async (answer) => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      maxTier: "high",
+      confirm: { tiers: ["high"] },
+      routes: { high: [{ provider: "testprov", model: "high-a" }], premium: [{ provider: "testprov", model: "prem-a" }], xpremium: [{ provider: "testprov", model: "xprem-a" }] },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ answer });
+    await host.input("implement the upload worker changes");
+    expect(host.dialogs[0]?.title).not.toMatch(/[45] x?premium/);
+    expect(host.setModel).toEqual([]);
+  });
+
+  test.each([false, true])("ceiling blocks the active premium model when routing fails (HTTP error: %s)", async (httpError) => {
+    writeProjectConfig({ apiKey: "test-key", maxTier: "high" });
+    stubFetch(() => httpError ? new Response(null, { status: 400 }) : Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3], models: httpError ? models : [models[3]] });
+    expect(await host.input("implement the upload worker changes")).toEqual({ action: "handled" });
+    expect(host.setModel).toEqual([]);
+    expect(host.notes.some(([text]) => text.includes("prompt not sent") && text.includes("ceiling"))).toBe(true);
+  });
+
+  test("ceiling prevents reverting to an above-ceiling model", async () => {
+    writeProjectConfig({ apiKey: "test-key", maxTier: "high" });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3] });
+    await host.input("implement the upload worker changes");
+    await host.command("jev-router", "revert");
+    expect(host.setModel).toEqual([models[2]]);
+    expect(host.notes.at(-1)?.[0]).toContain("above the tier ceiling");
+  });
+
   test("recovers an unavailable model without a second classification and persists its park", async () => {
     writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
     stubFetch(() => Response.json(jevAnswers("implement", 1)));
