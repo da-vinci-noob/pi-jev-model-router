@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RouteTarget, ZaiQuotaConfig } from "./config";
 import type { QuotaEligibility, QuotaSnapshot } from "./quota";
 
@@ -21,8 +22,9 @@ function resetAtMs(value: unknown): number | undefined {
 
 /**
  * Parse the Z.AI usage payload into the shared snapshot shape. Only the 5h
- * token window (unit 3) is read: the lite plan reports no weekly token window,
- * and unit 5 is a monthly time limit, not a token quota.
+ * token meter is read: the lite plan reports no weekly token window, and a
+ * `TIME_LIMIT` row is a duration cap, not a token quota. Meter rows share a
+ * `unit`, so `type` and `number` identify the token window too.
  */
 export function parseZaiUsage(payload: unknown, now = Date.now()): QuotaSnapshot {
   const limits = record(record(payload).data).limits;
@@ -30,13 +32,14 @@ export function parseZaiUsage(payload: unknown, now = Date.now()): QuotaSnapshot
   if (Array.isArray(limits)) {
     for (const entry of limits) {
       const row = record(entry);
-      if (finiteNumber(row.unit) !== 3) continue;
-      const used = finiteNumber(row.percentage);
-      if (used === undefined || used < 0 || used > 100) continue;
-      windows.fiveHour = {
-        remaining: (100 - used) / 100,
-        resetAt: resetAtMs(row.nextResetTime),
-      };
+      if (row.type !== "TOKENS_LIMIT" || finiteNumber(row.unit) !== 3 || finiteNumber(row.number) !== 5) continue;
+      const percentage = finiteNumber(row.percentage);
+      if (percentage === undefined || percentage < 0) continue;
+      // Over-100 means the window is spent, so it reads as 0% remaining instead of unknown.
+      const used = Math.min(100, percentage);
+      const reading = { remaining: (100 - used) / 100, resetAt: resetAtMs(row.nextResetTime) };
+      // If a response repeats the window, keep the more conservative reading.
+      if (!windows.fiveHour || reading.remaining < windows.fiveHour.remaining) windows.fiveHour = reading;
     }
   }
   return { fetchedAt: now, windows };
@@ -114,21 +117,21 @@ export function describeZaiQuotaStatus(
   if (!config.enabled) return ["zai quota: disabled (quota.zai.enabled is false)"];
   const floor = config.minQuota.fiveHour ?? 0;
   const lines = [`zai quota: on (ttl ${config.cacheTtlSec}s, onUnknown ${config.onUnknown})`];
-  if (!snapshot) {
-    lines.push("reading: none yet (startup stays unknown until the first fetch lands)");
-  } else {
+  if (snapshot) {
     const reading = snapshot.windows.fiveHour;
     const suffix = floor > 0 ? `, floor ${(floor * 100).toFixed(1)}%` : "";
-    if (!reading) {
-      lines.push(`fiveHour: no reading${suffix}`);
-    } else {
+    if (reading) {
       const resetPassed = reading.resetAt !== undefined && reading.resetAt <= now;
       const reset = reading.resetAt === undefined ? "" : `, resets in ${span(reading.resetAt - now)}${resetPassed ? " (reset passed)" : ""}`;
       lines.push(`fiveHour: ${(reading.remaining * 100).toFixed(1)}% remaining${reset}${suffix}`);
+    } else {
+      lines.push(`fiveHour: no reading${suffix}`);
     }
     const fresh = isFresh(config, snapshot, now);
     lines.push(`reading: ${fresh ? "fresh" : "stale"} (age ${span(Math.abs(now - snapshot.fetchedAt))}${fresh ? "" : `, ttl ${config.cacheTtlSec}s`})`);
     if (!fresh) lines.push(`  a stale reading is treated as unknown; onUnknown=${config.onUnknown}`);
+  } else {
+    lines.push("reading: none yet (startup stays unknown until the first fetch lands)");
   }
   if (lastError) lines.push(`last error: ${lastError}`);
   return lines;
@@ -144,6 +147,8 @@ export class ZaiQuotaCache {
   private controller?: AbortController;
   private stopped = false;
   private started = false;
+  /** Fingerprint of the credential that produced the current snapshot. */
+  private tokenKey?: string;
   private readonly initialization = Promise.withResolvers<void>();
   /** Resolves after credential validation, without waiting for the usage HTTP response. */
   readonly ready = this.initialization.promise;
@@ -178,6 +183,14 @@ export class ZaiQuotaCache {
         const read = async () => {
           const token = await this.getToken();
           if (signal.aborted || this.stopped) return;
+          // A different or missing key invalidates the reading before the request runs,
+          // so a failed refresh can never reuse the previous account's quota.
+          const tokenKey = token ? createHash("sha256").update(`token:${token}`).digest("hex") : undefined;
+          if (this.tokenKey !== tokenKey || !token) {
+            this.snapshot = undefined;
+            this.lastError = undefined;
+          }
+          this.tokenKey = tokenKey;
           this.initialization.resolve();
           if (!token) {
             this.fail("no zai credentials for the quota endpoint");
