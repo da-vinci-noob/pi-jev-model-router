@@ -72,7 +72,12 @@ export function firstAvailable(
 ): { target: RouteTarget; model: AvailableModel } | undefined {
   for (const target of chain) {
     const model = findModel(models, target);
-    if (model && eligibleTarget(target, model, eligibility, notes)) return { target, model };
+    if (!model) {
+      const note = `${target.provider}/${target.model} skipped: not in the model catalogue`;
+      if (notes && !notes.includes(note)) notes.push(note);
+      continue;
+    }
+    if (eligibleTarget(target, model, eligibility, notes)) return { target, model };
   }
   return undefined;
 }
