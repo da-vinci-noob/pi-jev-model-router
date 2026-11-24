@@ -570,6 +570,9 @@ default (`jev-router:high · max high`), and a decision that the ceiling moved
 says so in its notes (`ceiling high → capped at high`). A current model above
 the ceiling is never kept by `stickiness` or the prompt-cache guard, since that
 would route around the cap.
+Confirmation overrides and `/jev-router revert` also respect the ceiling. If
+routing cannot switch away from an active above-ceiling model, the prompt is
+not sent.
 
 An unknown value is ignored: the ceiling already in effect stays and one warning
 is reported at session start. A typo can never raise the ceiling.
@@ -927,13 +930,13 @@ By default, routing failures do not block your turn. A missing key, network
 error, timeout (default 3.5 s, retried on 429/529), or unknown model warns and
 runs the prompt on the current model unchanged.
 
-[Opt-in quota protection](#codex-quota-guards) is the exception: if routing cannot
-switch safely and the current model is quota-ineligible, the router reports
-**prompt not sent**. Such prompts are not automatically queued.
+If routing cannot switch safely and the current model is above the
+[tier ceiling](#tier-ceiling), expired, or [quota-ineligible](#codex-quota-guards),
+the router reports **prompt not sent**. Such prompts are not automatically queued.
 
 Prompts starting with `/` and messages sent by other extensions are not routed.
 Acknowledgements (`yes`, `continue`, …) and short continuations normally stay
-on the current model, but are routed when quota protection rejects that model.
+on the current model, but are routed when its ceiling, deadline, or quota rejects it.
 
 ## Publishing to pi.dev/packages
 
