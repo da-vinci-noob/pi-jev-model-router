@@ -386,6 +386,17 @@ describe("findModel / firstAvailable", () => {
     expect(hit?.target).toBe(chain[1]);
     expect(firstAvailable(ALL, [{ provider: P, model: "missing" }])).toBeUndefined();
   });
+
+  test("records a note for a chained model that is not in the catalogue", () => {
+    const chain: RouteTarget[] = [
+      { provider: P, model: "missing" },
+      { provider: P, model: "model-q1" },
+    ];
+    const notes: string[] = [];
+    const hit = firstAvailable(ALL, chain, undefined, notes);
+    expect(hit?.model).toBe(q1);
+    expect(notes).toContain(`${P}/missing skipped: not in the model catalogue`);
+  });
 });
 
 describe("decide: xpremium tier", () => {
