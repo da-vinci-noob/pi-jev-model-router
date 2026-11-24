@@ -49,6 +49,15 @@ export function tierIndex(tier: Tier | undefined): number {
 
 const PREMIUM = TIERS.indexOf("premium");
 
+/**
+ * Highest tier index this config may route to. `maxTier` is a hard ceiling, so a
+ * launching context that cannot answer a dialog can forbid the expensive tiers
+ * without turning routing off. Unset means no ceiling.
+ */
+export function maxTierIndex(config: JevRouterConfig): number {
+  return config.maxTier === undefined ? PREMIUM + 1 : Math.min(tierIndex(config.maxTier), PREMIUM + 1);
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -79,16 +88,17 @@ export function firstAvailable(
 
 /** Kind specialists eligible at a tier, in the order `decide()` tries them. */
 export function kindCandidates(config: JevRouterConfig, kind: string, index: number): RouteTarget[] {
+  const limit = Math.min(index, maxTierIndex(config));
   return (config.kindModels[kind] ?? [])
-    .filter((target) => tierIndex(target.minTier) <= index)
+    .filter((target) => tierIndex(target.minTier) <= limit)
     .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || tierIndex(b.minTier) - tierIndex(a.minTier));
 }
 
 /** The specialist that wins at each tier from the kind's floor up, merging runs, e.g. `high: a · premium: b`. */
 export function describeKindRoutes(config: JevRouterConfig, models: readonly AvailableModel[], kind: string, eligibility?: TargetEligibility): string {
   const spans: { from: Tier; to: Tier; model: string }[] = [];
-  const top = config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM;
-  for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), PREMIUM); i <= top; i += 1) {
+  const top = Math.min(config.routes.xpremium.length > 0 ? PREMIUM + 1 : PREMIUM, maxTierIndex(config));
+  for (let i = Math.min(tierIndex(config.kindMinimumTier[kind] ?? "quick"), top); i <= top; i += 1) {
     const model = firstAvailable(models, kindCandidates(config, kind, i), eligibility)?.model.id ?? "tier chain";
     const last = spans[spans.length - 1];
     if (last?.model === model) last.to = TIERS[i];
@@ -184,6 +194,7 @@ export function decide(
 ): Decision | undefined {
   const notes: string[] = options.notes ?? [];
   const { spend } = options;
+  const ceiling = maxTierIndex(config);
 
   let demand = 0.55 * analysis.complexity + 0.45 * analysis.budgetIntensity;
   if (analysis.deepReasoning >= 0.65) demand += 0.75;
@@ -215,6 +226,7 @@ export function decide(
   }
 
   const xpremiumEligible =
+    ceiling > PREMIUM &&
     config.routes.xpremium.length > 0 &&
     demandReachesPremium &&
     analysis.kindConfidence > 0 &&
@@ -223,7 +235,9 @@ export function decide(
     desiredIndex = PREMIUM + 1;
     index = desiredIndex;
   }
-  const tierCount = xpremiumEligible ? TIERS.length : PREMIUM + 1;
+  // `tierCount` bounds the neighbouring-tier expansion, so an unavailable chain
+  // can never pull a tier above the ceiling back in.
+  const tierCount = Math.min(xpremiumEligible ? TIERS.length : PREMIUM + 1, ceiling + 1);
 
   // Budget guard: hard pressure forces the cheap tier unless the work is clearly architectural.
   let downgraded = false;
@@ -242,6 +256,15 @@ export function decide(
       index -= 1;
       downgraded = true;
     }
+  }
+
+  // Ceiling guard: the most expensive tier this process may touch. It runs after
+  // the kind floor, the confidence guard and both budget guards, so whichever of
+  // them picks a tier, nothing above `maxTier` survives.
+  if (index > ceiling) {
+    notes.push(`ceiling ${TIERS[ceiling]} → capped at ${TIERS[ceiling]}`);
+    index = ceiling;
+    downgraded = true;
   }
 
   // Candidate order: the free pool (when `prefer`), then kind specialists for the
@@ -271,6 +294,11 @@ export function decide(
   const currentModel = options.current?.model;
   const currentTarget = currentModel ? options.current?.target ?? targetForModel(config, currentModel) : undefined;
   const currentEligible = !currentModel || !currentTarget || eligibleTarget(currentTarget, currentModel, options.eligibility, notes);
+  // A current model above the ceiling is on its way out, so never hold it for the
+  // cache; the downgrade is the point of the ceiling.
+  if (currentIndex !== undefined && currentIndex > ceiling) {
+    notes.push(`current ${TIERS[currentIndex]} sits above ceiling ${TIERS[ceiling]} → ${TIERS[index]}`);
+  }
 
   const usedKindChain = kindChain.some(
     (t) => t.provider === available.target.provider && t.model === available.target.model,
@@ -302,6 +330,7 @@ export function decide(
     currentEligible &&
     currentIndex !== undefined &&
     currentModel &&
+    currentIndex <= ceiling &&
     (currentIndex <= PREMIUM || index > PREMIUM) &&
     (available.model.provider !== currentModel.provider || available.model.id !== currentModel.id)
   ) {

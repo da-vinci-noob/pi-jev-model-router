@@ -10,7 +10,7 @@ mock.module("node:os", () => ({ ...osCopy, homedir: () => fakeHome }));
 
 const { DEFAULT_CONFIG, TASK_KINDS, apiKeyFor, hasApiKey, loadConfig } = await import("../extensions/pi-jev-model-router/config");
 
-const ENV_KEYS = ["TYPESAFE_API_KEY", "JEV_ROUTER_MODE", "JEV_ROUTER_OFF"] as const;
+const ENV_KEYS = ["TYPESAFE_API_KEY", "JEV_ROUTER_MODE", "JEV_ROUTER_OFF", "JEV_ROUTER_MAX_TIER"] as const;
 const globalFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.json");
 const generatedFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.generated.json");
 let savedEnv: Record<string, string | undefined>;
@@ -320,6 +320,39 @@ describe("loadConfig", () => {
     loadConfig(cwd);
     expect(DEFAULT_CONFIG.enabled).toBe(true);
     expect(DEFAULT_CONFIG.mode).toBe("auto");
+  });
+
+  test("maxTier defaults to xpremium, which keeps routing unchanged", () => {
+    expect(DEFAULT_CONFIG.maxTier).toBe("xpremium");
+    expect(loadConfig(cwd).maxTier).toBe("xpremium");
+  });
+
+  test("maxTier takes the last valid tier from the config layers", () => {
+    writeGlobal({ maxTier: "high" });
+    expect(loadConfig(cwd).maxTier).toBe("high");
+    writeProject({ maxTier: "premium" });
+    expect(loadConfig(cwd).maxTier).toBe("premium");
+    writeProject({ maxTier: "quick" });
+    expect(loadConfig(cwd).maxTier).toBe("quick");
+  });
+
+  test("an unknown maxTier keeps the previous ceiling and is noted", () => {
+    writeGlobal({ maxTier: "high" });
+    writeProject({ maxTier: "ultra" });
+    const config = loadConfig(cwd);
+    expect(config.maxTier).toBe("high");
+    expect(config.warnings?.join(" ")).toContain("maxTier");
+    expect(DEFAULT_CONFIG.warnings).toBeUndefined();
+  });
+
+  test("JEV_ROUTER_MAX_TIER overrides the file value and ignores unknown values", () => {
+    writeProject({ maxTier: "premium" });
+    process.env.JEV_ROUTER_MAX_TIER = "HIGH";
+    expect(loadConfig(cwd).maxTier).toBe("high");
+    process.env.JEV_ROUTER_MAX_TIER = "turbo";
+    const config = loadConfig(cwd);
+    expect(config.maxTier).toBe("premium");
+    expect(config.warnings?.join(" ")).toContain("JEV_ROUTER_MAX_TIER");
   });
 });
 
