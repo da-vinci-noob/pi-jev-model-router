@@ -32,12 +32,13 @@ import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
 import {
   decide,
   eligibleTarget,
+  isTargetExpired,
   targetForModel,
   type TargetEligibility,
   describeKindRoutes,
   describeDecision,
   firstAvailable,
- kindCandidates,
+  kindCandidates,
   tierIndex,
   tierForModel,
   type AvailableModel,
@@ -271,13 +272,16 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 }
 
 function eligibilityFor(runtime: Runtime): TargetEligibility {
- return (target, model) => {
-  const key = `${model.provider}/${model.id}`;
-  if (runtime.parking?.has(key, Date.now(), runtime.config)) {
-   return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
-  }
-  return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
- };
+  return (target, model) => {
+    const key = `${model.provider}/${model.id}`;
+    if (isTargetExpired(target)) {
+      return { allowed: false, notes: [`${key} skipped: expired ${String(target.expiresAt)}`] };
+    }
+    if (runtime.parking?.has(key, Date.now(), runtime.config)) {
+      return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
+    }
+    return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  };
 }
 
 function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
@@ -285,9 +289,15 @@ function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: str
   const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
   const target = runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
     ? runtime.lastDecision.target : targetForModel(runtime.config, model);
- const result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
- for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
- return result.allowed;
+  const key = `${model.provider}/${model.id}`;
+  if (isTargetExpired(target)) {
+    const note = `${key} skipped: expired ${String(target.expiresAt)}`;
+    if (!notes.includes(note)) notes.push(note);
+    return false;
+  }
+  const result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
+  for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
+  return result.allowed;
 }
 
 function formatParkDuration(parkMs: number): string {
@@ -296,6 +306,24 @@ function formatParkDuration(parkMs: number): string {
     return minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`;
   }
   return `${parkMs}ms`;
+}
+
+function expiredTargetNotes(config: JevRouterConfig): string[] {
+  const seen = new Set<string>();
+  const notes: string[] = [];
+  const check = (targets: readonly { provider: string; model: string; expiresAt?: string | number }[]) => {
+    for (const target of targets) {
+      if (!isTargetExpired(target)) continue;
+      const key = `${target.provider}/${target.model}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      notes.push(`${key} expired ${String(target.expiresAt)}`);
+    }
+  };
+  for (const tier of TIERS) check(config.routes[tier]);
+  for (const chain of Object.values(config.kindModels)) check(chain);
+  check(config.free.pool);
+  return notes;
 }
 
 /** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
@@ -1023,7 +1051,9 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             } finally {
               try {
                 rmSync(tmp, { force: true });
-              } catch {}
+              } catch {
+                /* best-effort cleanup */
+              }
             }
             runtime.config = loadConfig(ctx.cwd);
             statusLine(ctx, runtime);
@@ -1065,6 +1095,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
       `rate limits: ${runtime.config.rateLimit.enabled ? "on" : "off"}`,
       ...(runtime.parking?.list() ?? []),
+      ...expiredTargetNotes(runtime.config),
             `cache-aware: ${runtime.config.cache.aware ? `on (cap ${formatUsd(runtime.config.cache.maxPenaltyUsd)}, deadband ${runtime.config.cache.deadband})` : "off"}`,
             `built-in models: ${runtime.config.useDefaultModels ? "on" : "off (config-only)"}`,
             `jev requests: ${runtime.ledger.jev.requests}`,

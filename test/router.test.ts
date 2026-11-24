@@ -9,6 +9,7 @@ import {
   estimateCachePenaltyUsd,
   findModel,
   firstAvailable,
+  isTargetExpired,
   kindCandidates,
   tierForModel,
 } from "../extensions/pi-jev-model-router/router";
@@ -544,5 +545,43 @@ describe("estimateCachePenaltyUsd", () => {
       expect(estimateCachePenaltyUsd(tokens, s1, p1)).toBe(0);
     }
     expect(estimateCachePenaltyUsd(100_000, p1, model("t", { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }))).toBe(0);
+  });
+});
+
+describe("decide: time-limited targets", () => {
+  test("expired targets are skipped with a clear note", () => {
+    const c = config({
+      routes: {
+        ...config().routes,
+        quick: [
+          { provider: P, model: "model-q1", thinkingLevel: "off", expiresAt: "2020-01-01T00:00:00Z" },
+          { provider: P, model: "model-q2", thinkingLevel: "off" },
+        ],
+      },
+    });
+    const d = decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options());
+    expect(d?.model?.id).toBe("model-q2");
+    expect(d?.notes.some((n) => n.includes("model-q1 skipped: expired 2020-01-01T00:00:00Z"))).toBe(true);
+  });
+
+  test("future expiresAt stays eligible", () => {
+    const c = config({
+      routes: {
+        ...config().routes,
+        quick: [
+          { provider: P, model: "model-q1", thinkingLevel: "off", expiresAt: "2099-01-01T00:00:00Z" },
+          { provider: P, model: "model-q2", thinkingLevel: "off" },
+        ],
+      },
+    });
+    const d = decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options());
+    expect(d?.model?.id).toBe("model-q1");
+  });
+
+  test("isTargetExpired handles epoch ms and invalid values", () => {
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: 1 })).toBe(true);
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: Date.now() + 60_000 })).toBe(false);
+    expect(isTargetExpired({ provider: P, model: "m" })).toBe(false);
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: "not-a-date" })).toBe(false);
   });
 });

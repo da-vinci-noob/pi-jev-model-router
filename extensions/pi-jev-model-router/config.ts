@@ -33,6 +33,11 @@ export interface RouteTarget {
   priority?: number;
   /** Minimum remaining account-quota ratios (0..1), currently Codex only. */
   minQuota?: QuotaFloors;
+  /**
+   * Optional deadline after which this target is skipped. ISO 8601 with timezone
+   * or epoch milliseconds. Useful for time-limited promotional/free models.
+   */
+  expiresAt?: string | number;
 }
 
 export const QUOTA_WINDOWS = ["fiveHour", "weekly"] as const;
@@ -362,6 +367,19 @@ export function normalizeQuotaFloors(value: unknown): QuotaFloors {
   return floors;
 }
 
+const ISO_TZ_RE = /(Z|[+-]\d{2}:?\d{2})$/i;
+
+function normalizeExpiresAt(value: unknown): string | number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || !ISO_TZ_RE.test(trimmed)) return undefined;
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms) ? trimmed : undefined;
+}
+
 function normalizeChain(value: unknown): RouteChain | undefined {
   const list = Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
   const targets = list.filter(
@@ -373,6 +391,7 @@ function normalizeChain(value: unknown): RouteChain | undefined {
     ...t,
     priority: t.priority === undefined || Number.isFinite(t.priority) ? t.priority : undefined,
     minQuota: t.minQuota === undefined ? undefined : normalizeQuotaFloors(t.minQuota),
+    expiresAt: t.expiresAt === undefined ? undefined : normalizeExpiresAt(t.expiresAt),
   }));
 }
 

@@ -7,7 +7,19 @@ import type { QuotaEligibility } from "./quota";
 
 export type TargetEligibility = (target: RouteTarget, model: AvailableModel) => QuotaEligibility;
 
+export function isTargetExpired(target: RouteTarget, now = Date.now()): boolean {
+  const { expiresAt } = target;
+  if (expiresAt === undefined) return false;
+  const ms = typeof expiresAt === "number" ? expiresAt : Date.parse(expiresAt);
+  return Number.isFinite(ms) && now >= ms;
+}
+
 export function eligibleTarget(target: RouteTarget, model: AvailableModel, eligibility?: TargetEligibility, notes?: string[]): boolean {
+  if (isTargetExpired(target)) {
+    const note = `${target.provider}/${target.model} skipped: expired ${String(target.expiresAt)}`;
+    if (notes && !notes.includes(note)) notes.push(note);
+    return false;
+  }
   const result = eligibility?.(target, model);
   for (const note of result?.notes ?? []) if (notes && !notes.includes(note)) notes.push(note);
   return result?.allowed ?? true;
