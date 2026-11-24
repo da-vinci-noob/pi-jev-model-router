@@ -449,3 +449,52 @@ describe("confirm gate config", () => {
     expect(loadConfig(cwd).confirm.timeoutMs).toBe(0);
   });
 });
+
+describe("time-limited model targets", () => {
+  test("preserves a valid ISO expiresAt on route targets", () => {
+    writeProject({ routes: { quick: [{ provider: "testprov", model: "model-a", expiresAt: "2026-12-01T00:00:00Z" }] } });
+    expect(loadConfig(cwd).routes.quick[0].expiresAt).toBe("2026-12-01T00:00:00Z");
+  });
+
+  test("preserves a valid epoch-millisecond expiresAt", () => {
+    writeProject({ routes: { quick: [{ provider: "testprov", model: "model-a", expiresAt: 1796083200000 }] } });
+    expect(loadConfig(cwd).routes.quick[0].expiresAt).toBe(1796083200000);
+  });
+
+  test("keeps an unreadable expiresAt verbatim so the restriction is never dropped", () => {
+    writeProject({
+      routes: {
+        quick: [
+          { provider: "testprov", model: "model-a", expiresAt: "next week" },
+          { provider: "testprov", model: "model-b", expiresAt: -1 },
+          { provider: "testprov", model: "model-c", expiresAt: "2026-13-01T00:00:00Z" },
+          { provider: "testprov", model: "model-d", expiresAt: "2026-02-30T00:00:00Z" },
+          { provider: "testprov", model: "model-e", expiresAt: "" },
+        ],
+      },
+    });
+    const quick = loadConfig(cwd).routes.quick;
+    expect(quick.map((t) => t.model)).toEqual(["model-a", "model-b", "model-c", "model-d", "model-e"]);
+    expect(quick[0].expiresAt).toBe("next week");
+    expect(quick[1].expiresAt).toBe(-1);
+    expect(quick[2].expiresAt).toBe("2026-13-01T00:00:00Z");
+    expect(quick[3].expiresAt).toBe("2026-02-30T00:00:00Z");
+    // An empty value declares no deadline at all.
+    expect(quick[4].expiresAt).toBeUndefined();
+  });
+
+  test("trims a valid ISO deadline", () => {
+    writeProject({ routes: { quick: [{ provider: "testprov", model: "model-a", expiresAt: " 2026-12-01T00:00:00Z " }] } });
+    expect(loadConfig(cwd).routes.quick[0].expiresAt).toBe("2026-12-01T00:00:00Z");
+  });
+
+  test("preserves expiresAt in kindModels and free pool", () => {
+    writeProject({
+      kindModels: { plan: [{ provider: "testprov", model: "model-a", expiresAt: "2026-12-01T00:00:00Z" }] },
+      free: { enabled: true, pool: [{ provider: "testprov", model: "model-b", expiresAt: 1796083200000 }] },
+    });
+    const config = loadConfig(cwd);
+    expect(config.kindModels.plan[0].expiresAt).toBe("2026-12-01T00:00:00Z");
+    expect(config.free.pool[0].expiresAt).toBe(1796083200000);
+  });
+});

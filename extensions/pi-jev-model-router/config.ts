@@ -35,6 +35,11 @@ export interface RouteTarget {
   priority?: number;
   /** Minimum remaining account-quota ratios (0..1), currently Codex only. */
   minQuota?: QuotaFloors;
+  /**
+   * Optional deadline after which this target is skipped. ISO 8601 with timezone
+   * or epoch milliseconds. Useful for time-limited promotional/free models.
+   */
+  expiresAt?: string | number;
 }
 
 export const QUOTA_WINDOWS = ["fiveHour", "weekly"] as const;
@@ -394,8 +399,26 @@ export function normalizeQuotaFloors(value: unknown): QuotaFloors {
   return floors;
 }
 
+/**
+ * Keep a declared deadline as written. The value is validated where it is used,
+ * because a deadline the router cannot read has to fail closed: dropping it would
+ * leave the target unrestricted, which is the opposite of the intent.
+ */
+function normalizeExpiresAt(value: unknown): string | number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** A chain block may be written as one entry or as a list. */
+function asList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  return value && typeof value === "object" ? [value] : [];
+}
+
 function normalizeChain(value: unknown): RouteChain | undefined {
-  const list = Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
+  const list = asList(value);
   const targets = list.filter(
     (item): item is RouteTarget =>
       Boolean(item) && typeof item === "object" && typeof (item as RouteTarget).provider === "string" && typeof (item as RouteTarget).model === "string",
@@ -405,7 +428,15 @@ function normalizeChain(value: unknown): RouteChain | undefined {
     ...t,
     priority: t.priority === undefined || Number.isFinite(t.priority) ? t.priority : undefined,
     minQuota: t.minQuota === undefined ? undefined : normalizeQuotaFloors(t.minQuota),
+    expiresAt: t.expiresAt === undefined ? undefined : normalizeExpiresAt(t.expiresAt),
   }));
+}
+
+/** A configured scores file: a bare path, or `~` for the home directory. */
+function resolveScoresFile(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  if (value === "~" || value.startsWith("~/")) return join(homedir(), value.slice(1));
+  return value;
 }
 
 function isTier(value: unknown): value is Tier {
@@ -460,14 +491,9 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     if (key in cutoffs && typeof value === "number" && Number.isFinite(value)) cutoffs[key as keyof typeof cutoffs] = value;
   }
   if (!(cutoffs.standard <= cutoffs.high && cutoffs.high <= cutoffs.premium)) cutoffs = base.ranking.cutoffs;
-  const scoresFile = rankingPatch.scoresFile;
+  const scoresFile = resolveScoresFile(rankingPatch.scoresFile, base.ranking.scoresFile);
   const ranking: RankingConfig = {
-    scoresFile:
-      typeof scoresFile !== "string"
-        ? base.ranking.scoresFile
-        : scoresFile === "~" || scoresFile.startsWith("~/")
-          ? join(homedir(), scoresFile.slice(1))
-          : scoresFile,
+    scoresFile,
     cutoffs,
     spreadProviders:
       typeof rankingPatch.spreadProviders === "boolean" ? rankingPatch.spreadProviders : base.ranking.spreadProviders,

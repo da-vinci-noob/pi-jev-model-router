@@ -247,6 +247,14 @@ not disable unavailable-model recovery. See
 [Rate-limit parking](../../README.md#rate-limit-parking) for detection rules and
 boundaries.
 
+### Time-limited targets
+
+A route target can include `expiresAt` (ISO 8601 with timezone, or epoch ms).
+After the deadline, the router skips that target and logs `provider/model skipped:
+expired <deadline>`. Invalid or ambiguous values are ignored during config
+normalization. Set the deadline on every route entry that should expire. See
+[Time-limited targets](../../README.md#time-limited-targets).
+
 
 
 ## Tuning notes

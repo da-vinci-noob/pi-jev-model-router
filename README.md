@@ -823,6 +823,32 @@ model. Set `rateLimit.enabled: false` to ignore rate-limit parks without
 affecting unavailable-model recovery. `/jev-router` lists saved parks that
 haven't expired, and `/jev-router recovery clear` removes parks and strikes.
 
+## Time-limited targets
+
+Promotional or temporary models can carry a deadline on the route entry:
+
+```json
+{
+  "provider": "opencode-go",
+  "model": "hungerg-free",
+  "thinkingLevel": "medium",
+  "expiresAt": "2026-12-01T00:00:00Z"
+}
+```
+
+`expiresAt` accepts an ISO 8601 timestamp with timezone (`Z` or `±HH:MM`) or an
+epoch-millisecond number. Invalid or ambiguous values are ignored during config
+normalization, so a bad deadline never drops the target.
+
+When the deadline passes, the target is skipped during routing with a clear note
+such as `opencode-go/hungerg-free skipped: expired 2026-12-01T00:00:00Z`. The
+router falls through to the next eligible candidate. Expiry is checked at
+decision time; it does not require a failed request first.
+
+`expiresAt` belongs to the individual route entry, like `minQuota`. If the same
+model appears in multiple chains, set the deadline on every entry that should
+expire.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model

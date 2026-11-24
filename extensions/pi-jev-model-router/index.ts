@@ -15,9 +15,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type RouteTarget } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
-import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary } from "./quota";
+import { CodexQuotaCache, describeQuotaStatus, quotaEligibility, quotaStatePath, quotaSummary, type QuotaEligibility } from "./quota";
 import { describeZaiQuotaStatus, zaiQuotaEligibility, zaiQuotaSummary, ZaiQuotaCache } from "./zai-quota";
 import { isModelUnavailable, isRateLimited, Parking } from "./recovery";
 import {
@@ -32,13 +32,16 @@ import {
 import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
 import {
   decide,
+  deadlineNote,
+  deadlineState,
   eligibleTarget,
+  isTargetExpired,
   targetForModel,
   type TargetEligibility,
   describeKindRoutes,
   describeDecision,
   firstAvailable,
- kindCandidates,
+  kindCandidates,
   maxTierIndex,
   tierIndex,
   tierForModel,
@@ -275,35 +278,50 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   setStatus(ctx, parts.join(" · "));
 }
 
-function eligibilityFor(runtime: Runtime): TargetEligibility {
- return (target, model) => {
-  const key = `${model.provider}/${model.id}`;
-  if (runtime.parking?.has(key, Date.now(), runtime.config)) {
-   return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
+function providerEligibility(target: RouteTarget, provider: string, runtime: Runtime): QuotaEligibility {
+  if (provider === "openai-codex") {
+    return quotaEligibility(target, provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
   }
-  if (model.provider === "openai-codex") {
-   return quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
-  }
-  if (model.provider === "zai") {
-   return zaiQuotaEligibility(target, runtime.config.quota.zai, runtime.zaiQuota?.snapshot);
-  }
+  if (provider === "zai") return zaiQuotaEligibility(target, runtime.config.quota.zai, runtime.zaiQuota?.snapshot);
   return { allowed: true, notes: [] };
- };
+}
+
+function eligibilityFor(runtime: Runtime): TargetEligibility {
+  return (target, model) => {
+    const key = `${model.provider}/${model.id}`;
+    if (isTargetExpired(target)) {
+      return { allowed: false, notes: [deadlineNote(target, key)] };
+    }
+    if (runtime.parking?.has(key, Date.now(), runtime.config)) {
+      return { allowed: false, notes: [`${key} skipped: model temporarily parked`] };
+    }
+    return providerEligibility(target, model.provider, runtime);
+  };
+}
+
+/** The target currently in force, resolved through the last decision when it matches. */
+function currentTarget(
+  ctx: ExtensionContext,
+  runtime: Runtime,
+): { target: RouteTarget; key: string; provider: string } | undefined {
+  if (!ctx.model) return undefined;
+  const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
+  const target =
+    runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
+      ? runtime.lastDecision.target
+      : targetForModel(runtime.config, model);
+  return { target, key: `${model.provider}/${model.id}`, provider: model.provider };
 }
 
 function currentQuotaAllowed(ctx: ExtensionContext, runtime: Runtime, notes: string[] = []): boolean {
-  if (!ctx.model) return true;
-  const model = runtime.models.find((m) => `${m.provider}/${m.id}` === currentModelKey(ctx)) ?? ctx.model;
-  const target = runtime.lastDecision?.model?.provider === model.provider && runtime.lastDecision.model.id === model.id
-    ? runtime.lastDecision.target : targetForModel(runtime.config, model);
-  let result: { allowed: boolean; notes: string[] };
-  if (model.provider === "openai-codex") {
-    result = quotaEligibility(target, model.provider, runtime.config.quota["openai-codex"], runtime.quota?.snapshot);
-  } else if (model.provider === "zai") {
-    result = zaiQuotaEligibility(target, runtime.config.quota.zai, runtime.zaiQuota?.snapshot);
-  } else {
-    result = { allowed: true, notes: [] };
+  const current = currentTarget(ctx, runtime);
+  if (!current) return true;
+  if (isTargetExpired(current.target)) {
+    const note = deadlineNote(current.target, current.key);
+    if (!notes.includes(note)) notes.push(note);
+    return false;
   }
+  const result = providerEligibility(current.target, current.provider, runtime);
   for (const note of result.notes) if (!notes.includes(note)) notes.push(note);
   return result.allowed;
 }
@@ -316,10 +334,44 @@ function formatParkDuration(parkMs: number): string {
   return `${parkMs}ms`;
 }
 
+function expiredTargetNotes(config: JevRouterConfig): string[] {
+  const seen = new Set<string>();
+  const notes: string[] = [];
+  const check = (targets: readonly { provider: string; model: string; expiresAt?: string | number }[]) => {
+    for (const target of targets) {
+      if (!isTargetExpired(target)) continue;
+      const key = `${target.provider}/${target.model}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // An unreadable deadline is reported as such: the target is unroutable and the
+      // user needs to see why, not just that it vanished from the chains.
+      notes.push(
+        deadlineState(target) === "invalid"
+          ? `${key} has an invalid expiresAt ${String(target.expiresAt)}; it is treated as expired`
+          : `${key} expired ${String(target.expiresAt)}`,
+      );
+    }
+  };
+  for (const tier of TIERS) check(config.routes[tier]);
+  for (const chain of Object.values(config.kindModels)) check(chain);
+  check(config.free.pool);
+  return notes;
+}
+
 /** Refusing a route must not quietly send the prompt to a quota-ineligible current model. */
 function quotaBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
   if (currentQuotaAllowed(ctx, runtime, notes)) return false;
-  notify(ctx, `jev-router: prompt not sent; current model is quota-ineligible. Choose another model or retry after quota refresh.\n${notes.join("\n")}`, "warning");
+  const key = currentModelKey(ctx) ?? "current model";
+  const target = currentTarget(ctx, runtime)?.target;
+  const state = target ? deadlineState(target) : "none";
+  // An expired target is not a quota problem: retrying after a refresh cannot help.
+  const reason =
+    state === "expired"
+      ? `${key} expired ${String(target?.expiresAt)} and no eligible fallback is available. Choose another model.`
+      : state === "invalid"
+        ? `${key} has an invalid expiresAt ${String(target?.expiresAt)}, so it is treated as expired, and no eligible fallback is available. Choose another model.`
+        : "current model is quota-ineligible. Choose another model or retry after quota refresh.";
+  notify(ctx, `jev-router: prompt not sent; ${reason}\n${notes.join("\n")}`, "warning");
   return true;
 }
 
@@ -773,6 +825,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  });
  pi.on("agent_settled", async () => { runtime.recovery = undefined; runtime.failed = undefined; runtime.handledFailureKey = undefined; });
  pi.on("turn_end", async (event) => {
+  // SAFETY: the host emits a wider event than the narrow failure record kept here. Only
+  // `outcome` and `message` are read, and both arrive on this event.
   runtime.failed = event as unknown as Runtime["failed"];
   const message = event.message;
   if (event.outcome === "completed" && message.role === "assistant") {
@@ -781,6 +835,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
  });
  pi.on("agent_before_settle", async (event, ctx) => {
   // Failed requests can bypass finishTurn; act only at the final actionable boundary.
+  // SAFETY: merging the last recorded failure with this event yields the fields read
+  // below (`message`, `messageEntryId`, `entries`, `context`), and each is guarded.
   const boundary = { ...runtime.failed, ...event } as unknown as NonNullable<Runtime["failed"]> & {
    entries?: unknown[]; context?: { canContinue?: boolean };
   };
@@ -1104,6 +1160,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
       `recovery: ${runtime.config.recovery.enabled ? "on" : "off"}`,
       `rate limits: ${runtime.config.rateLimit.enabled ? "on" : "off"}`,
       ...(runtime.parking?.list() ?? []),
+      ...expiredTargetNotes(runtime.config),
             `cache-aware: ${runtime.config.cache.aware ? `on (cap ${formatUsd(runtime.config.cache.maxPenaltyUsd)}, deadband ${runtime.config.cache.deadband})` : "off"}`,
             `built-in models: ${runtime.config.useDefaultModels ? "on" : "off (config-only)"}`,
             `jev requests: ${runtime.ledger.jev.requests}`,
