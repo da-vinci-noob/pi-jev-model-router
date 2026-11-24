@@ -122,7 +122,7 @@ required: sensible defaults are built in.
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, model parks |
+| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, model parks, active context and ceiling |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
@@ -376,8 +376,15 @@ Later sources win:
 2. `~/.pi/agent/pi-jev-model-router.generated.json`: only `routes` and `kindModels`, written by `/jev-router suggest --write`
 3. `~/.pi/agent/pi-jev-model-router.json`
 4. `<cwd>/.pi/pi-jev-model-router.json` (trusted projects only)
-5. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`),
-   `JEV_ROUTER_MAX_TIER` (`quick|standard|high|premium|xpremium`), `JEV_ROUTER_OFF=1`
+5. `contexts`: the first rule in the active config that matches this process (see [Routing contexts](#routing-contexts))
+6. env: `TYPESAFE_API_KEY`, `JEV_ROUTER_MODE` (`auto|confirm|notify`),
+   `JEV_ROUTER_MAX_TIER` (`quick|standard|high|premium|xpremium`),
+   `JEV_ROUTER_CONTEXT` (name of a `contexts` rule), `JEV_ROUTER_OFF=1`
+
+The two variables with their defaults:
+
+- `JEV_ROUTER_MAX_TIER`: `quick|standard|high|premium|xpremium`. Unset keeps the file's `maxTier`, which defaults to `xpremium`. An unknown value leaves the ceiling in effect and reports one warning.
+- `JEV_ROUTER_CONTEXT`: the name of a `contexts` rule. Unset means marker matching decides. An unknown name is ignored with one warning, and marker matching still runs.
 
 A full example lives at
 [`extensions/pi-jev-model-router/pi-jev-model-router.example.json`](extensions/pi-jev-model-router/pi-jev-model-router.example.json).
@@ -546,7 +553,8 @@ A kind specialist with `minTier: "xpremium"` only serves promoted turns.
 
 `maxTier` is a hard ceiling. Nothing above it can become a candidate: not the
 chosen tier, not a neighbouring tier pulled in when a chain is unavailable, not a
-kind specialist. Routing keeps working, it just cannot reach the expensive rungs.
+kind specialist, and not the `xpremium` promotion. Routing keeps working, it
+just cannot reach the expensive rungs.
 
 ```json
 {
@@ -572,6 +580,42 @@ would route around the cap.
 
 An unknown value is ignored: the ceiling already in effect stays and one warning
 is reported at session start. A typo can never raise the ceiling.
+
+## Routing contexts
+
+A routing context is a named rule that adjusts this process without a separate
+config file. `contexts` is a list, evaluated after the four config layers, and
+the first rule that matches applies. A rule changes only the fields it declares.
+
+```json
+{
+  "contexts": [
+    {
+      "name": "orca",
+      "matchEnv": ["ORCA_STRUCTURED_SESSION", "ORCA_BOT_TOOLS_TOKEN", "ORCA_AGENT_SESSION_ID"],
+      "maxTier": "high"
+    }
+  ]
+}
+```
+
+A rule matches when any variable named in `matchEnv` is set and non-empty.
+`JEV_ROUTER_CONTEXT` picks a rule by name and beats marker matching, so a
+launcher that sets no marker can still choose a profile. An unknown name is
+ignored with one warning.
+
+A rule may set any of `maxTier`, `enabled` and `mode`. Contexts run before the
+environment overrides, so an explicit `JEV_ROUTER_MAX_TIER`, `JEV_ROUTER_MODE` or
+`JEV_ROUTER_OFF` still wins for that process.
+
+The status line shows the active context and the ceiling
+(`jev-router:high · max high · ctx orca`), and a rule that changed routing
+records it in the notes (`context orca → max high`).
+
+A pi started by a desktop app has nobody at a routing dialog and must not spend
+premium money, while a pi started in a terminal keeps full routing. That is the
+case above: `orca` matches the markers an app-launched session sets and caps it
+at `high`, and a terminal session matches no rule and keeps every tier.
 
 ## Confirming an expensive switch
 
@@ -847,7 +891,8 @@ to the pool. Check the provider's data policy before enabling it.
 | `enabled` | `true` | Master switch |
 | `useDefaultModels` | `true` | `false` drops the built-in model chains so only your config's models are used |
 | `mode` | `"auto"` | `auto` \| `confirm` \| `notify` |
-| `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, or served by a kind specialist |
+| `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, served by a kind specialist, or promoted into `xpremium` |
+| `contexts` | none | Named routing contexts applied after the four config layers, first match wins; each rule sets only the `maxTier`, `enabled` and `mode` it declares |
 | `apiKeyEnv` / `apiKey` | `TYPESAFE_API_KEY` | TypeSafe credentials |
 | `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` / `https://api.typesafe.ai/v1/systemone` | TypeSafe-compatible evaluation endpoint (non-empty env wins over `endpoint`) |
 | `jevModel` | `"jev-latest"` | Jev model alias |
