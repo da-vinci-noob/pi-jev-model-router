@@ -267,6 +267,7 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   const parts = [`jev-router:${tier}`];
   const ceiling = runtime.config.maxTier;
   if (ceiling !== undefined && ceiling !== "xpremium") parts.push(`max ${ceiling}`);
+  if (runtime.config.context) parts.push(`ctx ${runtime.config.context}`);
   if (spend.today > 0) parts.push(formatUsd(spend.today));
   if (spend.pressure > 0) parts.push(`${Math.round(spend.pressure * 100)}%`);
   if (runtime.config.mode !== "auto") parts.push(runtime.config.mode);

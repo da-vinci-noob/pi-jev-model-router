@@ -572,6 +572,14 @@ describe("decide: maxTier ceiling", () => {
     expect(d.notes.some((note) => note.includes("above ceiling high"))).toBe(true);
   });
 
+  test("a context that capped the tier says so instead of the plain ceiling note", () => {
+    const capped = run(premiumDemand, { maxTier: "high", context: "orca" }, { models });
+    expect(capped.tier).toBe("high");
+    expect(capped.notes).toContain("context orca → max high");
+    expect(capped.notes).not.toContain("ceiling high → capped at high");
+    expect(run(premiumDemand, { maxTier: "high" }, { models }).notes).toContain("ceiling high → capped at high");
+  });
+
   test("describeKindRoutes stops at the ceiling", () => {
     const kindModels = { plan: [{ provider: P, model: "spec-p", minTier: "premium" as const }] };
     const pool = [...models, model("spec-p")];
