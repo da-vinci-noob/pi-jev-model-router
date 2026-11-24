@@ -546,7 +546,8 @@ A kind specialist with `minTier: "xpremium"` only serves promoted turns.
 
 `maxTier` is a hard ceiling. Nothing above it can become a candidate: not the
 chosen tier, not a neighbouring tier pulled in when a chain is unavailable, not a
-kind specialist. Routing keeps working, it just cannot reach the expensive rungs.
+kind specialist, and not the `xpremium` promotion. Routing keeps working, it
+just cannot reach the expensive rungs.
 
 ```json
 {
@@ -847,7 +848,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `enabled` | `true` | Master switch |
 | `useDefaultModels` | `true` | `false` drops the built-in model chains so only your config's models are used |
 | `mode` | `"auto"` | `auto` \| `confirm` \| `notify` |
-| `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, or served by a kind specialist |
+| `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, served by a kind specialist, or promoted into `xpremium` |
 | `apiKeyEnv` / `apiKey` | `TYPESAFE_API_KEY` | TypeSafe credentials |
 | `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` / `https://api.typesafe.ai/v1/systemone` | TypeSafe-compatible evaluation endpoint (non-empty env wins over `endpoint`) |
 | `jevModel` | `"jev-latest"` | Jev model alias |
