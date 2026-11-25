@@ -950,18 +950,7 @@ This repository is already prepared for it:
 - `package.json` contains a `pi` manifest pointing at the extension entry point
 - `package.json` contains `pi.image`, which the gallery uses as the preview card
 
-**Maintainer releases:** merge the `package.json` version bump, then publish a
-stable GitHub release with a matching `v<version>` tag. The **Publish to npm**
-workflow tests that tag and publishes it using npm Trusted Publishing.
-
-One-time setup in the [npm package settings](https://www.npmjs.com/package/pi-jev-model-router/access):
-add a [GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/)
-with owner `da-vinci-noob`, repository `pi-jev-model-router`, and workflow
-filename `publish.yml`. Allow `npm publish`; leave the environment blank.
-No npm token is needed. For a GitHub release published before the workflow was
-installed, run **Publish to npm** manually from `main` with its existing tag.
-
-For manual publishing from a clean checkout of the release tag:
+To publish:
 
 ```bash
 # 1. Log in to npm (once)
@@ -980,7 +969,9 @@ Then:
 2. Check the listing at `https://pi.dev/packages/pi-jev-model-router`.
 3. Anyone can then install it with `pi install npm:pi-jev-model-router`.
 
-Keep the `image` URL pointed at a released tag or `main` so it never 404s.
+**Releases:** bump `version` in `package.json`, commit, tag, and re-run
+`npm publish`. Keep the `image` URL pointed at a released tag or `main` so it
+never 404s.
 
 **If the name is taken**, publish under a scope (`@yourname/pi-jev-model-router`)
 — the gallery indexes scoped packages too; install with
