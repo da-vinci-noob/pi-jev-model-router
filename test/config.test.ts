@@ -10,7 +10,13 @@ mock.module("node:os", () => ({ ...osCopy, homedir: () => fakeHome }));
 
 const { DEFAULT_CONFIG, TASK_KINDS, apiKeyFor, hasApiKey, loadConfig } = await import("../extensions/pi-jev-model-router/config");
 
-const ENV_KEYS = ["TYPESAFE_API_KEY", "JEV_ROUTER_MODE", "JEV_ROUTER_OFF", "JEV_ROUTER_MAX_TIER"] as const;
+const ENV_KEYS = [
+  "TYPESAFE_API_KEY",
+  "JEV_ROUTER_MODE",
+  "JEV_ROUTER_OFF",
+  "JEV_ROUTER_MAX_TIER",
+  "ORCA_AGENT_SESSION_ID",
+] as const;
 const globalFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.json");
 const generatedFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.generated.json");
 let savedEnv: Record<string, string | undefined>;
@@ -312,6 +318,14 @@ describe("loadConfig", () => {
     expect(loadConfig(cwd).enabled).toBe(false);
     process.env.JEV_ROUTER_OFF = "0";
     expect(loadConfig(cwd).enabled).toBe(true);
+  });
+
+  test("launcher identity markers alone keep routing enabled", () => {
+    writeProject({ enabled: true });
+    process.env.ORCA_AGENT_SESSION_ID = "fixture-session";
+    expect(loadConfig(cwd).enabled).toBe(true);
+    process.env.JEV_ROUTER_OFF = "1";
+    expect(loadConfig(cwd).enabled).toBe(false);
   });
 
   test("env overrides do not leak into DEFAULT_CONFIG", () => {
