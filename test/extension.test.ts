@@ -176,6 +176,55 @@ describe("pi extension", () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
+  test("a context ceiling never falls open onto an above-ceiling active model", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+      routes: {
+        quick: [],
+        standard: [],
+        high: [],
+        premium: [{ provider: "testprov", model: "prem-a" }],
+      },
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3], models: [models[3]] });
+    expect(await host.input("rewrite the routing layer end to end")).toEqual({ action: "handled" });
+    expect(host.setModel).toEqual([]);
+    expect(host.notes.some(([text]) => text.includes("prompt not sent") && text.includes("ceiling"))).toBe(true);
+  });
+
+  test("a kept decision keeps the ceiling and context on the status line", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      stickiness: true,
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[2] });
+    await host.input("rewrite the routing layer end to end");
+    const last = host.statuses[host.statuses.length - 1];
+    expect(last).toContain("max high");
+    expect(last).toContain("ctx orca");
+    expect(last.endsWith("✓")).toBe(true);
+  });
+
+  test("/jev-router status reports the ceiling and the active context", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    await host.command("jev-router", "status");
+    const status = host.notes.at(-1)?.[0] ?? "";
+    expect(status).toContain("max tier: high");
+    expect(status).toContain("context: orca");
+  });
+
   test.each(["4", "5"])("ceiling rejects confirmation override %s", async (answer) => {
     writeProjectConfig({
       apiKey: "test-key",

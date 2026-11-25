@@ -29,7 +29,7 @@ import {
   spendSnapshot,
   type Ledger,
 } from "./budget";
-import { classifyRequest, JevError, type RouteAnalysis } from "./jev";
+import { classifyRequest, type RouteAnalysis } from "./jev";
 import {
   decide,
   deadlineNote,
@@ -124,6 +124,19 @@ function setStatus(ctx: ExtensionContext, text: string): void {
   }
 }
 
+/** Entry marker for a routing decision, one glyph per action. */
+function actionGlyph(action: string): string {
+  if (action === "switched") return "→";
+  if (action === "kept") return "=";
+  if (action === "notified") return "•";
+  return "×";
+}
+
+/** Message from anything thrown, without assuming the thrown value is an Error. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function appendDecisionEntry(
   analysis: RouteAnalysis,
   decision: Decision,
@@ -166,7 +179,7 @@ function appendSkipEntry(skipReason: string, ctx: ExtensionContext, runtime: Run
   appendEntry(
     {
       action: "skipped",
-      tier: runtime.appliedTierIndex !== undefined ? TIERS[runtime.appliedTierIndex] : "current",
+      tier: runtime.appliedTierIndex === undefined ? "current" : TIERS[runtime.appliedTierIndex],
       model,
       kind: skipReason,
       kindConfidence: 0,
@@ -262,13 +275,10 @@ function shouldSkip(text: string, config: JevRouterConfig, hasHistory: boolean):
   return undefined;
 }
 
-function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
+/** Status parts shared by the live line and a kept-model turn, so the ceiling and context never vanish. */
+function statusParts(runtime: Runtime): string[] {
   const spend = spendSnapshot(runtime.ledger, runtime.config.budget);
-  if (!runtime.config.enabled) {
-    setStatus(ctx, "jev-router:off");
-    return;
-  }
-  const tier = runtime.appliedTierIndex !== undefined ? TIERS[runtime.appliedTierIndex] : "on";
+  const tier = runtime.appliedTierIndex === undefined ? "on" : TIERS[runtime.appliedTierIndex];
   const parts = [`jev-router:${tier}`];
   const ceiling = runtime.config.maxTier;
   if (ceiling !== undefined && ceiling !== "xpremium") parts.push(`max ${ceiling}`);
@@ -276,7 +286,15 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   if (spend.today > 0) parts.push(formatUsd(spend.today));
   if (spend.pressure > 0) parts.push(`${Math.round(spend.pressure * 100)}%`);
   if (runtime.config.mode !== "auto") parts.push(runtime.config.mode);
-  setStatus(ctx, parts.join(" · "));
+  return parts;
+}
+
+function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
+  if (!runtime.config.enabled) {
+    setStatus(ctx, "jev-router:off");
+    return;
+  }
+  setStatus(ctx, statusParts(runtime).join(" · "));
 }
 
 function providerEligibility(target: RouteTarget, provider: string, runtime: Runtime): QuotaEligibility {
@@ -364,6 +382,22 @@ function aboveTierCeiling(key: string | undefined, config: JevRouterConfig): boo
   return tier !== undefined && tier > maxTierIndex(config);
 }
 
+/** Why the current model cannot serve this prompt, phrased for the user. */
+function blockReason(key: string, target: RouteTarget | undefined): string {
+  if (!target) return BLOCK_QUOTA;
+  // An expired target is not a quota problem: retrying after a refresh cannot help.
+  const state = deadlineState(target);
+  if (state === "expired") {
+    return `${key} expired ${String(target.expiresAt)} and no eligible fallback is available. Choose another model.`;
+  }
+  if (state === "invalid") {
+    return `${key} has an invalid expiresAt ${String(target.expiresAt)}, so it is treated as expired, and no eligible fallback is available. Choose another model.`;
+  }
+  return BLOCK_QUOTA;
+}
+
+const BLOCK_QUOTA = "current model is quota-ineligible. Choose another model or retry after quota refresh.";
+
 /** A failed or declined switch must not submit on an ineligible current model. */
 function submissionBlocked(ctx: ExtensionContext, runtime: Runtime, notes: string[]): boolean {
   if (aboveTierCeiling(currentModelKey(ctx), runtime.config)) {
@@ -372,15 +406,7 @@ function submissionBlocked(ctx: ExtensionContext, runtime: Runtime, notes: strin
   }
   if (currentQuotaAllowed(ctx, runtime, notes)) return false;
   const key = currentModelKey(ctx) ?? "current model";
-  const target = currentTarget(ctx, runtime)?.target;
-  const state = target ? deadlineState(target) : "none";
-  // An expired target is not a quota problem: retrying after a refresh cannot help.
-  const reason =
-    state === "expired"
-      ? `${key} expired ${String(target?.expiresAt)} and no eligible fallback is available. Choose another model.`
-      : state === "invalid"
-        ? `${key} has an invalid expiresAt ${String(target?.expiresAt)}, so it is treated as expired, and no eligible fallback is available. Choose another model.`
-        : "current model is quota-ineligible. Choose another model or retry after quota refresh.";
+  const reason = blockReason(key, currentTarget(ctx, runtime)?.target);
   notify(ctx, `jev-router: prompt not sent; ${reason}\n${notes.join("\n")}`, "warning");
   return true;
 }
@@ -554,7 +580,7 @@ async function applyDecision(
     runtime.appliedTierIndex = decision.tierIndex;
     runtime.lastDecision = decision;
     runtime.lastAnalysis = analysis;
-    setStatus(ctx, `jev-router:${decision.tier} ✓`);
+    setStatus(ctx, `${statusParts(runtime).join(" · ")} ✓`);
     appendDecisionEntry(analysis, decision, "kept", runtime);
     return { action: "kept", message: `${headline} — already active` };
   }
@@ -717,8 +743,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           box.addChild(new Text(theme.fg("dim", "jev-router: no decision data"), 0, 0));
           return box;
         }
-        const glyph =
-          data.action === "switched" ? "→" : data.action === "kept" ? "=" : data.action === "notified" ? "•" : "×";
+        const glyph = actionGlyph(data.action);
         const label = data.skipReason ? `${theme.fg("accent", "jev-router ·")} ${theme.bold("not routed")}` : `${theme.fg("accent", `jev-router ${glyph} ${data.tier}`)}  ${theme.bold(data.model)}`;
         box.addChild(new Text(label, 0, 0));
         if (data.skipReason) {
@@ -987,7 +1012,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
    }
     } catch (error) {
       statusLine(ctx, runtime);
-      const message = error instanceof JevError ? error.message : error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (!/abort/i.test(message)) notify(ctx, `jev-router: ${message}`, "warning");
       if (submissionBlocked(ctx, runtime, runtime.routeNotes)) return { action: "handled" };
     }
@@ -1165,6 +1190,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           const lines = [
             `enabled: ${runtime.config.enabled}`,
             `mode: ${runtime.config.mode}`,
+            `max tier: ${runtime.config.maxTier ?? "none"}`,
+            `context: ${runtime.config.context ?? "none"}`,
             `jev model: ${runtime.config.jevModel}`,
             `api key: ${hasApiKey(runtime.config) ? `${runtime.config.apiKeyEnv} ✓` : "missing"}`,
             `current model: ${currentModelKey(ctx) ?? "unknown"}`,

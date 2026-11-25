@@ -454,6 +454,36 @@ describe("loadConfig: routing contexts", () => {
     expect(config.warnings?.join(" ")).toContain("maxTier");
   });
 
+  test("a project rule keeps unrelated inherited rules", () => {
+    writeGlobal({ contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "high" }] });
+    writeProject({ contexts: [{ name: "ci", matchEnv: ["CTX_MARKER_B"], maxTier: "standard" }] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts?.map((rule) => rule.name)).toEqual(["alpha", "ci"]);
+    expect(config.context).toBe("alpha");
+    expect(config.maxTier).toBe("high");
+  });
+
+  test("a project rule overrides the inherited rule of the same name", () => {
+    writeGlobal({ contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "high" }] });
+    writeProject({ contexts: [{ name: "alpha", maxTier: "quick" }] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts).toEqual([{ name: "alpha", maxTier: "quick" }]);
+    // The inherited marker is gone, so nothing matches and no cap is applied.
+    expect(config.context).toBeUndefined();
+    expect(config.maxTier).toBe("xpremium");
+  });
+
+  test("an empty list drops inherited contexts", () => {
+    writeGlobal({ contexts: [alpha] });
+    writeProject({ contexts: [] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts).toEqual([]);
+    expect(config.context).toBeUndefined();
+  });
+
   test("no contexts key leaves routing untouched", () => {
     const config = loadConfig(cwd);
     expect(config.contexts).toBeUndefined();

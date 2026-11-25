@@ -482,14 +482,22 @@ function normalizeContexts(
   warnings: string[],
 ): ContextRule[] | undefined {
   if (!Array.isArray(value)) return fallback;
-  const rules: ContextRule[] = [];
+  // An empty list is the explicit way to drop every inherited rule; anything else
+  // merges by name, so a project rule cannot silently delete the global ones.
+  if (value.length === 0) return [];
+  const declaredByName = new Map<string, ContextRule>();
   for (const entry of value) {
     const parsed = parseContextRule(entry);
     if (!parsed) continue;
     if ("error" in parsed) warnings.push(parsed.error);
-    else rules.push(parsed.rule);
+    else declaredByName.set(parsed.rule.name, parsed.rule);
   }
-  return rules;
+  // Inherited order is kept, because first match wins when several markers are set.
+  const merged = (fallback ?? []).map((rule) => declaredByName.get(rule.name) ?? rule);
+  for (const [name, rule] of declaredByName) {
+    if (!merged.some((entry) => entry.name === name)) merged.push(rule);
+  }
+  return merged;
 }
 
 function parseContextRule(value: unknown): { rule: ContextRule } | { error: string } | undefined {
