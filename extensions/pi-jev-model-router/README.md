@@ -251,8 +251,11 @@ boundaries.
 
 A route target can include `expiresAt` (ISO 8601 with timezone, or epoch ms).
 After the deadline, the router skips that target and logs `provider/model skipped:
-expired <deadline>`. Invalid or ambiguous values are ignored during config
-normalization. Set the deadline on every route entry that should expire. See
+expired <deadline>`. A deadline it cannot read is kept as written and treated as
+expired, so the target is skipped and the note reads `invalid expiresAt <value>`.
+This fails closed on purpose: rolling an impossible date into the next month
+would drop a restriction you declared. Set the deadline on every route entry that
+should expire. See
 [Time-limited targets](../../README.md#time-limited-targets).
 
 
