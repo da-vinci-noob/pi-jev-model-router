@@ -883,17 +883,27 @@ Promotional or temporary models can carry a deadline on the route entry:
 ```
 
 `expiresAt` accepts an ISO 8601 timestamp with timezone (`Z` or `±HH:MM`) or an
-epoch-millisecond number. Invalid or ambiguous values are ignored during config
-normalization, so a bad deadline never drops the target.
+epoch-millisecond number. A value the router cannot read is kept as written and
+treated as expired, so the target is unroutable and the note names the value that
+failed.
 
 When the deadline passes, the target is skipped during routing with a clear note
-such as `opencode-go/hungerg-free skipped: expired 2026-12-01T00:00:00Z`. The
-router falls through to the next eligible candidate. Expiry is checked at
-decision time; it does not require a failed request first.
+such as `opencode-go/hungerg-free skipped: expired 2026-12-01T00:00:00Z`. An
+unreadable value produces
+`opencode-go/hungerg-free skipped: invalid expiresAt 2026-02-30T00:00:00Z`
+instead. The router falls through to the next eligible candidate. Expiry is
+checked at decision time; it does not require a failed request first.
+
+This fails closed on purpose. A date parser would roll `2026-02-30` forward into
+March, and either rolling it or ignoring it would drop a restriction you declared.
+Keeping the value and marking the target unroutable leaves the restriction in force.
 
 `expiresAt` belongs to the individual route entry, like `minQuota`. If the same
 model appears in multiple chains, set the deadline on every entry that should
 expire.
+
+`/jev-router` repeats every expired or unreadable deadline with the value as you
+declared it, before the tier and kind lists.
 
 ## Free models
 
