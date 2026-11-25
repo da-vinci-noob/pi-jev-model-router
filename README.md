@@ -587,8 +587,15 @@ is reported at session start. A typo can never raise the ceiling.
 ## Routing contexts
 
 A routing context is a named rule that adjusts this process without a separate
-config file. `contexts` is a list, evaluated after the four config layers, and
-the first rule that matches applies. A rule changes only the fields it declares.
+config file. `contexts` is a list of named rules, merged across the four config
+layers, and the merged list is evaluated once when the process starts: the first
+rule that matches applies.
+
+Rules merge by name across layers. A later layer that declares an existing `name`
+replaces that rule outright, so an override has to restate `matchEnv` or the rule
+stops matching, and a name the earlier layers do not have is appended behind them.
+Declaration order matters, because the first match wins when the process starts. To
+drop every inherited rule, declare `"contexts": []`.
 
 ```json
 {
@@ -607,8 +614,10 @@ A rule matches when any variable named in `matchEnv` is set and non-empty.
 launcher that sets no marker can still choose a profile. An unknown name is
 ignored with one warning.
 
-A rule may set any of `maxTier`, `enabled` and `mode`. Contexts run before the
-environment overrides, so an explicit `JEV_ROUTER_MAX_TIER`, `JEV_ROUTER_MODE` or
+A rule may set any of `maxTier`, `enabled` and `mode`, and it applies only the
+fields it declares. An override replaces the whole rule, so the fields it leaves
+out are gone rather than inherited. Contexts run before the environment
+overrides, so an explicit `JEV_ROUTER_MAX_TIER`, `JEV_ROUTER_MODE` or
 `JEV_ROUTER_OFF` still wins for that process.
 
 The status line shows the active context and the ceiling
@@ -955,7 +964,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `useDefaultModels` | `true` | `false` drops the built-in model chains so only your config's models are used |
 | `mode` | `"auto"` | `auto` \| `confirm` \| `notify` |
 | `maxTier` | `"xpremium"` | Hard ceiling (`quick` … `xpremium`): no tier above it can be chosen, offered as a fallback, served by a kind specialist, or promoted into `xpremium` |
-| `contexts` | none | Named routing contexts applied after the four config layers, first match wins; each rule sets only the `maxTier`, `enabled` and `mode` it declares |
+| `contexts` | none | Named routing contexts merged by name across the config layers, first match wins; an override replaces the whole rule |
 | `apiKeyEnv` / `apiKey` | `TYPESAFE_API_KEY` | TypeSafe credentials |
 | `endpointEnv` / `endpoint` | `TYPESAFE_API_URL` / `https://api.typesafe.ai/v1/systemone` | TypeSafe-compatible evaluation endpoint (non-empty env wins over `endpoint`) |
 | `jevModel` | `"jev-latest"` | Jev model alias |
