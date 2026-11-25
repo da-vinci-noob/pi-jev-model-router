@@ -4,11 +4,13 @@ import type { RouteAnalysis } from "../extensions/pi-jev-model-router/jev";
 import {
   type AvailableModel,
   type DecideOptions,
+  deadlineState,
   decide,
   describeKindRoutes,
   estimateCachePenaltyUsd,
   findModel,
   firstAvailable,
+  isTargetExpired,
   kindCandidates,
   tierForModel,
 } from "../extensions/pi-jev-model-router/router";
@@ -656,5 +658,93 @@ describe("estimateCachePenaltyUsd", () => {
       expect(estimateCachePenaltyUsd(tokens, s1, p1)).toBe(0);
     }
     expect(estimateCachePenaltyUsd(100_000, p1, model("t", { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }))).toBe(0);
+  });
+});
+
+describe("decide: time-limited targets", () => {
+  test("expired targets are skipped with a clear note", () => {
+    const c = config({
+      routes: {
+        ...config().routes,
+        quick: [
+          { provider: P, model: "model-q1", thinkingLevel: "off", expiresAt: "2020-01-01T00:00:00Z" },
+          { provider: P, model: "model-q2", thinkingLevel: "off" },
+        ],
+      },
+    });
+    const d = decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options());
+    expect(d?.model?.id).toBe("model-q2");
+    expect(d?.notes.some((n) => n.includes("model-q1 skipped: expired 2020-01-01T00:00:00Z"))).toBe(true);
+  });
+
+  test("future expiresAt stays eligible", () => {
+    const c = config({
+      routes: {
+        ...config().routes,
+        quick: [
+          { provider: P, model: "model-q1", thinkingLevel: "off", expiresAt: "2099-01-01T00:00:00Z" },
+          { provider: P, model: "model-q2", thinkingLevel: "off" },
+        ],
+      },
+    });
+    const d = decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options());
+    expect(d?.model?.id).toBe("model-q1");
+  });
+
+  test("isTargetExpired handles epoch ms, invalid values and absent deadlines", () => {
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: 1 })).toBe(true);
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: Date.now() + 60_000 })).toBe(false);
+    expect(isTargetExpired({ provider: P, model: "m" })).toBe(false);
+    // A deadline nobody can read must fail closed, never lift the restriction.
+    expect(isTargetExpired({ provider: P, model: "m", expiresAt: "not-a-date" })).toBe(true);
+  });
+
+  test("a deadline the date parser would roll over is invalid, not the next month", () => {
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2026-02-30T00:00:00Z" })).toBe("invalid");
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2026-04-31T00:00:00Z" })).toBe("invalid");
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2026-02-29T00:00:00Z" })).toBe("invalid");
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2026-12-01T25:00:00Z" })).toBe("invalid");
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2026-13-01T00:00:00Z" })).toBe("invalid");
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2028-02-29T00:00:00Z" }, Date.parse("2026-01-01T00:00:00Z"))).toBe(
+      "active",
+    );
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2030-01-01T00:00:00Z" }, Date.parse("2026-01-01T00:00:00Z"))).toBe(
+      "active",
+    );
+    expect(deadlineState({ provider: P, model: "m", expiresAt: "2020-01-01T00:00:00Z" }, Date.parse("2026-01-01T00:00:00Z"))).toBe(
+      "expired",
+    );
+    expect(deadlineState({ provider: P, model: "m" })).toBe("none");
+  });
+
+  test("a target with an unreadable deadline is skipped and says why", () => {
+    const c = config({
+      routes: {
+        ...config().routes,
+        quick: [
+          { provider: P, model: "model-q1", thinkingLevel: "off", expiresAt: "2026-02-30T00:00:00Z" },
+          { provider: P, model: "model-q2", thinkingLevel: "off" },
+        ],
+      },
+    });
+    const d = decide(analysis({ complexity: 0, budgetIntensity: 0 }), c, options());
+    expect(d?.model?.id).toBe("model-q2");
+    expect(d?.notes.some((n) => n.includes("invalid expiresAt 2026-02-30T00:00:00Z"))).toBe(true);
+  });
+
+  test("the serving chain travels with the model, so a duplicate entry cannot hide the tier", () => {
+    const c = config({
+      routes: {
+        quick: [],
+        standard: [{ provider: P, model: "model-h1", expiresAt: "2020-01-01T00:00:00Z" }],
+        high: [{ provider: P, model: "model-h1" }],
+        premium: [{ provider: P, model: "model-p1" }],
+        xpremium: [],
+      },
+    });
+    const d = decide(analysis({ complexity: 1, budgetIntensity: 1 }), c, options());
+    expect(d?.tier).toBe("high");
+    expect(d?.tierIndex).toBe(2);
+    expect(d?.notes).toContain("standard chain unavailable → high");
   });
 });

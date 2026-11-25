@@ -122,7 +122,7 @@ required: sensible defaults are built in.
 
 | Command | What it does |
 | --- | --- |
-| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, model parks, active context and ceiling |
+| `/jev-router` | Status: mode, spend, tier chains, kind specialists, last decision, model parks, active context and ceiling, expired and invalid deadlines |
 | `/jev-router on` / `off` | Enable/disable routing |
 | `/jev-router mode auto\|confirm\|notify` | `auto` switches silently; `confirm` asks each turn; `notify` only tells you |
 | `/jev-router budget daily 10` | Session-only daily cap (persist it in the config file) |
@@ -577,6 +577,9 @@ default (`jev-router:high · max high`), and a decision that the ceiling moved
 says so in its notes (`ceiling high → capped at high`). A current model above
 the ceiling is never kept by `stickiness` or the prompt-cache guard, since that
 would route around the cap.
+Confirmation overrides and `/jev-router revert` also respect the ceiling. If
+routing cannot switch away from an active above-ceiling model, the prompt is
+not sent.
 
 An unknown value is ignored: the ceiling already in effect stays and one warning
 is reported at session start. A typo can never raise the ceiling.
@@ -866,6 +869,32 @@ model. Set `rateLimit.enabled: false` to ignore rate-limit parks without
 affecting unavailable-model recovery. `/jev-router` lists saved parks that
 haven't expired, and `/jev-router recovery clear` removes parks and strikes.
 
+## Time-limited targets
+
+Promotional or temporary models can carry a deadline on the route entry:
+
+```json
+{
+  "provider": "opencode-go",
+  "model": "hungerg-free",
+  "thinkingLevel": "medium",
+  "expiresAt": "2026-12-01T00:00:00Z"
+}
+```
+
+`expiresAt` accepts an ISO 8601 timestamp with timezone (`Z` or `±HH:MM`) or an
+epoch-millisecond number. Invalid or ambiguous values are ignored during config
+normalization, so a bad deadline never drops the target.
+
+When the deadline passes, the target is skipped during routing with a clear note
+such as `opencode-go/hungerg-free skipped: expired 2026-12-01T00:00:00Z`. The
+router falls through to the next eligible candidate. Expiry is checked at
+decision time; it does not require a failed request first.
+
+`expiresAt` belongs to the individual route entry, like `minQuota`. If the same
+model appears in multiple chains, set the deadline on every entry that should
+expire.
+
 ## Free models
 
 Tiers describe capability, not price, so there is nowhere in `TIERS` to put a model
@@ -945,13 +974,13 @@ By default, routing failures do not block your turn. A missing key, network
 error, timeout (default 3.5 s, retried on 429/529), or unknown model warns and
 runs the prompt on the current model unchanged.
 
-[Opt-in quota protection](#codex-quota-guards) is the exception: if routing cannot
-switch safely and the current model is quota-ineligible, the router reports
-**prompt not sent**. Such prompts are not automatically queued.
+If routing cannot switch safely and the current model is above the
+[tier ceiling](#tier-ceiling), expired, or [quota-ineligible](#codex-quota-guards),
+the router reports **prompt not sent**. Such prompts are not automatically queued.
 
 Prompts starting with `/` and messages sent by other extensions are not routed.
 Acknowledgements (`yes`, `continue`, …) and short continuations normally stay
-on the current model, but are routed when quota protection rejects that model.
+on the current model, but are routed when its ceiling, deadline, or quota rejects it.
 
 ## Publishing to pi.dev/packages
 

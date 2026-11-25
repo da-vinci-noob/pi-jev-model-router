@@ -176,6 +176,75 @@ describe("pi extension", () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
+  test.each(["4", "5"])("ceiling rejects confirmation override %s", async (answer) => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      maxTier: "high",
+      confirm: { tiers: ["high"] },
+      routes: { high: [{ provider: "testprov", model: "high-a" }], premium: [{ provider: "testprov", model: "prem-a" }], xpremium: [{ provider: "testprov", model: "xprem-a" }] },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ answer });
+    await host.input("implement the upload worker changes");
+    expect(host.dialogs[0]?.title).not.toMatch(/[45] x?premium/);
+    expect(host.setModel).toEqual([]);
+  });
+
+  test.each([false, true])("ceiling blocks the active premium model when routing fails (HTTP error: %s)", async (httpError) => {
+    writeProjectConfig({ apiKey: "test-key", maxTier: "high" });
+    stubFetch(() => httpError ? new Response(null, { status: 400 }) : Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3], models: httpError ? models : [models[3]] });
+    expect(await host.input("implement the upload worker changes")).toEqual({ action: "handled" });
+    expect(host.setModel).toEqual([]);
+    expect(host.notes.some(([text]) => text.includes("prompt not sent") && text.includes("ceiling"))).toBe(true);
+  });
+
+  test("ceiling prevents reverting to an above-ceiling model", async () => {
+    writeProjectConfig({ apiKey: "test-key", maxTier: "high" });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3] });
+    await host.input("implement the upload worker changes");
+    await host.command("jev-router", "revert");
+    expect(host.setModel).toEqual([models[2]]);
+    expect(host.notes.at(-1)?.[0]).toContain("above the tier ceiling");
+  });
+
+  test("an expired current model reports expiry instead of a quota retry", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      routes: {
+        quick: [{ provider: "testprov", model: "quick-a", expiresAt: "2020-01-01T00:00:00Z" }],
+        standard: [],
+        high: [],
+        premium: [],
+      },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    expect(await host.input("plan a migration for the upload client")).toEqual({ action: "handled" });
+    const blocked = host.notes.map(([text]) => text).find((text) => text.includes("prompt not sent"));
+    expect(blocked).toBeDefined();
+    expect(blocked).toContain("expired");
+    expect(blocked).not.toContain("quota-ineligible");
+  });
+
+  test("status reports an unreadable deadline as unroutable", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      routes: {
+        quick: [],
+        standard: [{ provider: "testprov", model: "std-a", expiresAt: "2026-02-30T00:00:00Z" }],
+        high: [],
+        premium: [],
+      },
+    });
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    await host.command("jev-router", "status");
+    const status = host.notes.at(-1)?.[0] ?? "";
+    expect(status).toContain("testprov/std-a has an invalid expiresAt 2026-02-30T00:00:00Z; it is treated as expired");
+  });
+
   test("recovers an unavailable model without a second classification and persists its park", async () => {
     writeProjectConfig({ apiKey: "test-key", recovery: { enabled: true } });
     stubFetch(() => Response.json(jevAnswers("implement", 1)));

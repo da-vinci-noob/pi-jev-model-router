@@ -7,7 +7,66 @@ import type { QuotaEligibility } from "./quota";
 
 export type TargetEligibility = (target: RouteTarget, model: AvailableModel) => QuotaEligibility;
 
+/** ISO timestamp with a mandatory timezone: the only shape a declared deadline may take. */
+const DEADLINE_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/**
+ * Parse a declared deadline.
+ *
+ * The Date parser silently rolls impossible values over (`2026-02-30` becomes
+ * March 2), which would move a deadline the user did not ask for. Every field is
+ * checked against the calendar first, so an impossible date is unreadable rather
+ * than quietly extended.
+ */
+export function parseDeadline(value: string | number): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  const trimmed = value.trim();
+  const match = DEADLINE_RE.exec(trimmed);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute, second] = match;
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  if (m < 1 || m > 12) return undefined;
+  // Day 0 of the next month is the last day of this one.
+  if (d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate()) return undefined;
+  if (Number(hour) > 23 || Number(minute) > 59 || (second !== undefined && Number(second) > 59)) return undefined;
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+export type DeadlineState = "none" | "invalid" | "active" | "expired";
+
+/** What a target's declared deadline says right now. */
+export function deadlineState(target: RouteTarget, now = Date.now()): DeadlineState {
+  if (target.expiresAt === undefined) return "none";
+  const ms = parseDeadline(target.expiresAt);
+  if (ms === undefined) return "invalid";
+  return now >= ms ? "expired" : "active";
+}
+
+/**
+ * A deadline the router cannot read counts as expired. Dropping it instead would
+ * leave the target unrestricted, which is the opposite of what the user asked for.
+ */
+export function isTargetExpired(target: RouteTarget, now = Date.now()): boolean {
+  const state = deadlineState(target, now);
+  return state === "expired" || state === "invalid";
+}
+
+/** Why a target was skipped for its deadline, with the declared value verbatim. */
+export function deadlineNote(target: RouteTarget, key = `${target.provider}/${target.model}`): string {
+  return deadlineState(target) === "invalid"
+    ? `${key} skipped: invalid expiresAt ${String(target.expiresAt)}`
+    : `${key} skipped: expired ${String(target.expiresAt)}`;
+}
+
 export function eligibleTarget(target: RouteTarget, model: AvailableModel, eligibility?: TargetEligibility, notes?: string[]): boolean {
+  if (isTargetExpired(target)) {
+    const note = deadlineNote(target);
+    if (notes && !notes.includes(note)) notes.push(note);
+    return false;
+  }
   const result = eligibility?.(target, model);
   for (const note of result?.notes ?? []) if (notes && !notes.includes(note)) notes.push(note);
   return result?.allowed ?? true;
