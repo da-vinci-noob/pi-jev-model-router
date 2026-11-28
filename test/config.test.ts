@@ -16,6 +16,9 @@ const ENV_KEYS = [
   "JEV_ROUTER_OFF",
   "JEV_ROUTER_MAX_TIER",
   "ORCA_AGENT_SESSION_ID",
+  "JEV_ROUTER_CONTEXT",
+  "CTX_MARKER_A",
+  "CTX_MARKER_B",
 ] as const;
 const globalFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.json");
 const generatedFile = join(fakeHome, ".pi", "agent", "pi-jev-model-router.generated.json");
@@ -367,6 +370,134 @@ describe("loadConfig", () => {
     const config = loadConfig(cwd);
     expect(config.maxTier).toBe("premium");
     expect(config.warnings?.join(" ")).toContain("JEV_ROUTER_MAX_TIER");
+  });
+});
+
+describe("loadConfig: routing contexts", () => {
+  const alpha = { name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "high" as const };
+  const beta = {
+    name: "beta",
+    matchEnv: ["CTX_MARKER_B"],
+    maxTier: "standard" as const,
+    mode: "notify" as const,
+  };
+
+  test("a rule matches on any one of its markers and not when none is set", () => {
+    writeProject({ contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A", "CTX_MARKER_B"], maxTier: "high" }] });
+    const none = loadConfig(cwd);
+    expect(none.context).toBeUndefined();
+    expect(none.maxTier).toBe("xpremium");
+    process.env.CTX_MARKER_B = "1";
+    const matched = loadConfig(cwd);
+    expect(matched.context).toBe("alpha");
+    expect(matched.maxTier).toBe("high");
+  });
+
+  test("a marker set to whitespace does not match", () => {
+    writeProject({ contexts: [alpha] });
+    process.env.CTX_MARKER_A = "  ";
+    expect(loadConfig(cwd).context).toBeUndefined();
+  });
+
+  test("first match wins and a later rule never partially overrides it", () => {
+    writeProject({ contexts: [alpha, beta] });
+    process.env.CTX_MARKER_A = "1";
+    process.env.CTX_MARKER_B = "1";
+    const config = loadConfig(cwd);
+    expect(config.context).toBe("alpha");
+    expect(config.maxTier).toBe("high");
+    expect(config.mode).toBe("auto");
+  });
+
+  test("a context applies only the fields it declares", () => {
+    writeProject({ mode: "confirm", contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "quick" }] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.maxTier).toBe("quick");
+    expect(config.mode).toBe("confirm");
+    expect(config.enabled).toBe(true);
+  });
+
+  test("a context can turn routing off and set the ask policy", () => {
+    writeProject({ contexts: [{ name: "beta", matchEnv: ["CTX_MARKER_B"], enabled: false, mode: "notify" }] });
+    process.env.CTX_MARKER_B = "1";
+    const config = loadConfig(cwd);
+    expect(config.enabled).toBe(false);
+    expect(config.mode).toBe("notify");
+    expect(config.maxTier).toBe("xpremium");
+  });
+
+  test("JEV_ROUTER_CONTEXT selects by name and beats a matching marker", () => {
+    writeProject({ contexts: [alpha, { name: "profile", maxTier: "premium", mode: "notify" }] });
+    process.env.CTX_MARKER_A = "1";
+    process.env.JEV_ROUTER_CONTEXT = "profile";
+    const config = loadConfig(cwd);
+    expect(config.context).toBe("profile");
+    expect(config.maxTier).toBe("premium");
+    expect(config.mode).toBe("notify");
+  });
+
+  test("the env ceiling still wins over a context ceiling", () => {
+    writeProject({ contexts: [alpha] });
+    process.env.CTX_MARKER_A = "1";
+    process.env.JEV_ROUTER_MAX_TIER = "quick";
+    expect(loadConfig(cwd).maxTier).toBe("quick");
+  });
+
+  test("an unknown context name is ignored with a note", () => {
+    writeProject({ contexts: [alpha] });
+    process.env.JEV_ROUTER_CONTEXT = "nope";
+    const config = loadConfig(cwd);
+    expect(config.context).toBeUndefined();
+    expect(config.maxTier).toBe("xpremium");
+    expect(config.warnings?.join(" ")).toContain("nope");
+  });
+
+  test("a rule with an invalid tier is dropped with a note, never applied", () => {
+    writeProject({ contexts: [{ name: "broken", matchEnv: ["CTX_MARKER_A"], maxTier: "ultra" }, beta] });
+    process.env.CTX_MARKER_A = "1";
+    process.env.CTX_MARKER_B = "1";
+    const config = loadConfig(cwd);
+    expect(config.context).toBe("beta");
+    expect(config.maxTier).toBe("standard");
+    expect(config.warnings?.join(" ")).toContain("maxTier");
+  });
+
+  test("a project rule keeps unrelated inherited rules", () => {
+    writeGlobal({ contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "high" }] });
+    writeProject({ contexts: [{ name: "ci", matchEnv: ["CTX_MARKER_B"], maxTier: "standard" }] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts?.map((rule) => rule.name)).toEqual(["alpha", "ci"]);
+    expect(config.context).toBe("alpha");
+    expect(config.maxTier).toBe("high");
+  });
+
+  test("a project rule overrides the inherited rule of the same name", () => {
+    writeGlobal({ contexts: [{ name: "alpha", matchEnv: ["CTX_MARKER_A"], maxTier: "high" }] });
+    writeProject({ contexts: [{ name: "alpha", maxTier: "quick" }] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts).toEqual([{ name: "alpha", maxTier: "quick" }]);
+    // The inherited marker is gone, so nothing matches and no cap is applied.
+    expect(config.context).toBeUndefined();
+    expect(config.maxTier).toBe("xpremium");
+  });
+
+  test("an empty list drops inherited contexts", () => {
+    writeGlobal({ contexts: [alpha] });
+    writeProject({ contexts: [] });
+    process.env.CTX_MARKER_A = "1";
+    const config = loadConfig(cwd);
+    expect(config.contexts).toEqual([]);
+    expect(config.context).toBeUndefined();
+  });
+
+  test("no contexts key leaves routing untouched", () => {
+    const config = loadConfig(cwd);
+    expect(config.contexts).toBeUndefined();
+    expect(config.context).toBeUndefined();
+    expect(config.warnings).toBeUndefined();
   });
 });
 
