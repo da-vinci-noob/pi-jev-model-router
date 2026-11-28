@@ -584,6 +584,33 @@ not sent.
 An unknown value is ignored: the ceiling already in effect stays and one warning
 is reported at session start. A typo can never raise the ceiling.
 
+## Skipping routing for launcher-managed sessions
+
+A launcher that starts Pi without a person at the prompt can turn routing off
+for its children with `JEV_ROUTER_OFF=1` in the child process environment. The
+extension reads that variable at config load, so the process keeps the model it
+was started with and the status line reads `jev-router:off`. A terminal session
+that does not inherit the variable keeps routing normally.
+
+Set the variable on the launch path. Editing the shared router config changes
+every Pi on the machine, and a local patch to the installed package disappears
+on the next update. Orca does this with its per-agent environment map:
+
+```json
+{
+  "agentDefaultEnv": {
+    "pi": { "JEV_ROUTER_OFF": "1" }
+  }
+}
+```
+
+Other launchers can set the same variable wherever they build the child
+environment. Harness markers such as `ORCA_AGENT_SESSION_ID` identify the
+process. They do not disable routing by themselves.
+
+For a ceiling instead of a full skip, use `JEV_ROUTER_MAX_TIER` as described in
+[Tier ceiling](#tier-ceiling).
+
 ## Routing contexts
 
 A routing context is a named rule that adjusts this process without a separate
