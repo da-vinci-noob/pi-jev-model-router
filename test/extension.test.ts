@@ -20,6 +20,9 @@ const cost = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 };
 const models = ["quick-a", "std-a", "high-a", "prem-a", "xprem-a"].map((id) => ({ provider: "testprov", id, cost }));
 const realFetch = globalThis.fetch;
 const savedKey = process.env.TYPESAFE_API_KEY;
+const savedContextEnv = Object.fromEntries(
+  ["JEV_ROUTER_CONTEXT", "ORCA_STRUCTURED_SESSION", "CTX_OFF"].map((key) => [key, process.env[key]]),
+);
 let cwd: string;
 let fetchCalls: string[];
 const shutdowns: Array<() => Promise<unknown>> = [];
@@ -84,6 +87,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   // Partial fake: only the surface the extension touches, which is the point of the fork test.
   await extension(fake as unknown as ExtensionAPI);
   const notes: Array<[string, string]> = [];
+  const statuses: string[] = [];
   const ctx = {
     cwd,
     model: options.current ?? models[0],
@@ -94,7 +98,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
     },
     ui: {
       notify: (text: string, level: string) => notes.push([text, level]),
-      setStatus: () => {},
+      setStatus: (_key: string, text: string) => statuses.push(text),
       select: async (title: string, options: string[]) => {
         dialogs.push({ title, options });
         return selectAnswer;
@@ -118,13 +122,16 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
     await emit("agent_end", {});
     return emit("agent_before_settle", { entries: failure.entries, context: failure.context, outcome: "error" });
   };
-  return { input, command, emit, settle, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
+  return { input, command, emit, settle, notes, statuses, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
 }
 
 beforeEach(() => {
   cwd = mkdtempSync(join(realOs.tmpdir(), "jev-ext-cwd-"));
   fetchCalls = [];
   delete process.env.TYPESAFE_API_KEY;
+  delete process.env.JEV_ROUTER_CONTEXT;
+  delete process.env.ORCA_STRUCTURED_SESSION;
+  delete process.env.CTX_OFF;
   writeProjectConfig({ apiKey: "test-key" });
 });
 
@@ -133,12 +140,91 @@ afterEach(async () => {
   globalThis.fetch = realFetch;
   if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY;
   else process.env.TYPESAFE_API_KEY = savedKey;
+  for (const [key, value] of Object.entries(savedContextEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   rmSync(cwd, { recursive: true, force: true });
 });
 
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 describe("pi extension", () => {
+  test("a routing context caps the tier, names itself and says why", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    expect(host.statuses[host.statuses.length - 1]).toContain("ctx orca");
+    expect(host.statuses[host.statuses.length - 1]).toContain("max high");
+    await host.input("rewrite the routing layer end to end");
+    expect(host.setModel).toEqual([models[2]]);
+    expect(host.notes.map(([text]) => text).join(" | ")).toContain("context orca → max high");
+  });
+
+  test("a context can turn routing off like enabled: false", async () => {
+    writeProjectConfig({ apiKey: "test-key", contexts: [{ name: "off", matchEnv: ["CTX_OFF"], enabled: false }] });
+    process.env.CTX_OFF = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    expect(host.statuses[host.statuses.length - 1]).toBe("jev-router:off");
+    await host.input("rewrite the routing layer end to end");
+    expect(host.setModel).toEqual([]);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  test("a context ceiling never falls open onto an above-ceiling active model", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+      routes: {
+        quick: [],
+        standard: [],
+        high: [],
+        premium: [{ provider: "testprov", model: "prem-a" }],
+      },
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[3], models: [models[3]] });
+    expect(await host.input("rewrite the routing layer end to end")).toEqual({ action: "handled" });
+    expect(host.setModel).toEqual([]);
+    expect(host.notes.some(([text]) => text.includes("prompt not sent") && text.includes("ceiling"))).toBe(true);
+  });
+
+  test("a kept decision keeps the ceiling and context on the status line", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      stickiness: true,
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load({ current: models[2] });
+    await host.input("rewrite the routing layer end to end");
+    const last = host.statuses[host.statuses.length - 1];
+    expect(last).toContain("max high");
+    expect(last).toContain("ctx orca");
+    expect(last.endsWith("✓")).toBe(true);
+  });
+
+  test("/jev-router status reports the ceiling and the active context", async () => {
+    writeProjectConfig({
+      apiKey: "test-key",
+      contexts: [{ name: "orca", matchEnv: ["ORCA_STRUCTURED_SESSION"], maxTier: "high" }],
+    });
+    process.env.ORCA_STRUCTURED_SESSION = "1";
+    stubFetch(() => Response.json(jevAnswers("implement", 3)));
+    const host = await load();
+    await host.command("jev-router", "status");
+    const status = host.notes.at(-1)?.[0] ?? "";
+    expect(status).toContain("max tier: high");
+    expect(status).toContain("context: orca");
+  });
+
   test.each(["4", "5"])("ceiling rejects confirmation override %s", async (answer) => {
     writeProjectConfig({
       apiKey: "test-key",

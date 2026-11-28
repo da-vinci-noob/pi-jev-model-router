@@ -8,6 +8,13 @@
   "timeoutMs": 3500,
   "confidenceThreshold": 0.34,
   "stickiness": true,
+  "contexts": [
+    {
+      "name": "orca",
+      "matchEnv": ["ORCA_STRUCTURED_SESSION", "ORCA_BOT_TOOLS_TOKEN", "ORCA_AGENT_SESSION_ID"],
+      "maxTier": "high"
+    }
+  ],
   "recovery": {
     "enabled": false,
     "parkMs": 3600000

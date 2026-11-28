@@ -326,7 +326,11 @@ export function decide(
   // the kind floor, the confidence guard and both budget guards, so whichever of
   // them picks a tier, nothing above `maxTier` survives.
   if (index > ceiling) {
-    notes.push(`ceiling ${TIERS[ceiling]} → capped at ${TIERS[ceiling]}`);
+    notes.push(
+      config.context
+        ? `context ${config.context} → max ${TIERS[ceiling]}`
+        : `ceiling ${TIERS[ceiling]} → capped at ${TIERS[ceiling]}`,
+    );
     index = ceiling;
     downgraded = true;
   }

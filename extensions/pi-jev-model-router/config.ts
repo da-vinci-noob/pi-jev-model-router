@@ -155,6 +155,22 @@ export interface RateLimitConfig {
   parkMs: number;
 }
 
+/**
+ * A named routing context: the constraints a launcher asks for when it selects one.
+ *
+ * One machine can run several pi launch paths with different tier access, e.g. a
+ * chat opened by an app (`maxTier: "high"`) next to an interactive terminal that
+ * keeps every tier. A rule applies only the fields it declares.
+ */
+export interface ContextRule {
+  name: string;
+  /** Environment variable names; a rule matches when any of them is set and non-empty. */
+  matchEnv?: string[];
+  maxTier?: Tier;
+  enabled?: boolean;
+  mode?: Mode;
+}
+
 export interface JevRouterConfig {
   enabled: boolean;
   mode: Mode;
@@ -175,6 +191,10 @@ export interface JevRouterConfig {
    * that does not set it.
    */
   maxTier?: Tier;
+  /** Named routing contexts, tried in order. First match wins. */
+  contexts?: ContextRule[];
+  /** The context rule this process matched, if any. Output only. */
+  context?: string;
   apiKeyEnv: string;
   apiKey?: string;
   endpointEnv: string;
@@ -443,6 +463,72 @@ function isTier(value: unknown): value is Tier {
   return typeof value === "string" && (TIERS as readonly string[]).includes(value);
 }
 
+function isMode(value: unknown): value is Mode {
+  return value === "auto" || value === "confirm" || value === "notify";
+}
+
+function warn(config: JevRouterConfig, message: string): void {
+  config.warnings = [...(config.warnings ?? []), message];
+}
+
+/**
+ * Validate the declared contexts. An entry without a name is dropped silently; a
+ * rule with an invalid field is dropped with a warning, since a broken rule must
+ * never apply half of itself.
+ */
+function normalizeContexts(
+  value: unknown,
+  fallback: ContextRule[] | undefined,
+  warnings: string[],
+): ContextRule[] | undefined {
+  if (!Array.isArray(value)) return fallback;
+  // An empty list is the explicit way to drop every inherited rule; anything else
+  // merges by name, so a project rule cannot silently delete the global ones.
+  if (value.length === 0) return [];
+  const declaredByName = new Map<string, ContextRule>();
+  for (const entry of value) {
+    const parsed = parseContextRule(entry);
+    if (!parsed) continue;
+    if ("error" in parsed) warnings.push(parsed.error);
+    else declaredByName.set(parsed.rule.name, parsed.rule);
+  }
+  // Inherited order is kept, because first match wins when several markers are set.
+  const merged = (fallback ?? []).map((rule) => declaredByName.get(rule.name) ?? rule);
+  for (const [name, rule] of declaredByName) {
+    if (!merged.some((entry) => entry.name === name)) merged.push(rule);
+  }
+  return merged;
+}
+
+function parseContextRule(value: unknown): { rule: ContextRule } | { error: string } | undefined {
+  const raw = asRecord(value);
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (!name) return undefined;
+  const rule: ContextRule = { name };
+  if (raw.maxTier !== undefined) {
+    if (!isTier(raw.maxTier)) {
+      return { error: `context ${name}: maxTier ${JSON.stringify(raw.maxTier)} is not a tier; rule ignored.` };
+    }
+    rule.maxTier = raw.maxTier;
+  }
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled !== "boolean") return { error: `context ${name}: enabled must be a boolean; rule ignored.` };
+    rule.enabled = raw.enabled;
+  }
+  if (raw.mode !== undefined) {
+    if (!isMode(raw.mode)) return { error: `context ${name}: mode ${JSON.stringify(raw.mode)} is not a mode; rule ignored.` };
+    rule.mode = raw.mode;
+  }
+  if (raw.matchEnv !== undefined) {
+    rule.matchEnv = Array.isArray(raw.matchEnv)
+      ? raw.matchEnv
+          .filter((marker): marker is string => typeof marker === "string" && marker.trim().length > 0)
+          .map((marker) => marker.trim())
+      : [];
+  }
+  return { rule };
+}
+
 /**
  * Validate a declared tier ceiling. An unknown value keeps the ceiling already in
  * effect (the default out of the box) and records a warning, so a typo can never
@@ -459,6 +545,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
   const p = asRecord(patch);
   const warnings = [...(base.warnings ?? [])];
   const maxTier = normalizeMaxTier(p.maxTier, base.maxTier ?? DEFAULT_MAX_TIER, warnings);
+  const contexts = normalizeContexts(p.contexts, base.contexts, warnings);
   const routes = { ...base.routes };
   const rawRoutes = asRecord(p.routes);
   for (const tier of TIERS) {
@@ -561,6 +648,7 @@ function merge(base: JevRouterConfig, patch: unknown): JevRouterConfig {
     ...base,
     ...(p as Partial<JevRouterConfig>),
     maxTier,
+    contexts,
     warnings: warnings.length > 0 ? warnings : undefined,
     routes,
     kindModels,
@@ -612,6 +700,9 @@ export function loadConfig(cwd?: string): JevRouterConfig {
   if (globalPatch) config = merge(config, globalPatch);
   if (projectPatch) config = merge(config, projectPatch);
 
+  // A named context narrows what this process may do, and only the fields it
+  // declares. It runs before the env overrides, so an explicit env var still wins.
+  applyContext(config);
   if (process.env.JEV_ROUTER_MODE) {
     const mode = process.env.JEV_ROUTER_MODE.toLowerCase();
     if (mode === "auto" || mode === "confirm" || mode === "notify") config.mode = mode;
@@ -624,6 +715,25 @@ export function loadConfig(cwd?: string): JevRouterConfig {
   return config;
 }
 
+/**
+ * Pick this process's routing context. `JEV_ROUTER_CONTEXT` selects a rule by name
+ * and beats marker matching, so a launcher with no marker can still choose a
+ * profile; otherwise the first rule with a set marker wins.
+ */
+function applyContext(config: JevRouterConfig): void {
+  const rules = config.contexts ?? [];
+  const selected = process.env.JEV_ROUTER_CONTEXT?.trim();
+  const named = selected ? rules.find((rule) => rule.name === selected) : undefined;
+  if (selected && !named) warn(config, `JEV_ROUTER_CONTEXT=${selected} matches no context; ignoring it.`);
+  const rule =
+    named ?? rules.find((candidate) => (candidate.matchEnv ?? []).some((marker) => Boolean(process.env[marker]?.trim())));
+  if (!rule) return;
+  if (rule.maxTier !== undefined) config.maxTier = rule.maxTier;
+  if (rule.enabled !== undefined) config.enabled = rule.enabled;
+  if (rule.mode !== undefined) config.mode = rule.mode;
+  config.context = rule.name;
+}
+
 /** `JEV_ROUTER_MAX_TIER` narrows (or widens) the ceiling for this process only. */
 function applyEnvMaxTier(config: JevRouterConfig): void {
   const raw = process.env.JEV_ROUTER_MAX_TIER?.trim().toLowerCase();
@@ -632,9 +742,7 @@ function applyEnvMaxTier(config: JevRouterConfig): void {
     config.maxTier = raw;
     return;
   }
-  const warnings = [...(config.warnings ?? [])];
-  warnings.push(`JEV_ROUTER_MAX_TIER=${raw} is not a tier; keeping ${config.maxTier ?? DEFAULT_MAX_TIER}.`);
-  config.warnings = warnings;
+  warn(config, `JEV_ROUTER_MAX_TIER=${raw} is not a tier; keeping ${config.maxTier ?? DEFAULT_MAX_TIER}.`);
 }
 
 function emptyChains(): Record<Tier, RouteChain> {
